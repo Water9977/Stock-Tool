@@ -102,6 +102,25 @@ async def automated_execution_loop(feed: MarketFeed, technicals: TechnicalEngine
                     last_trade[upstox_symbol] = asyncio.get_event_loop().time()
                     print(f"[EXECUTION] Automated SELL triggered for {upstox_symbol} (Signal: {signal}, Gate: {gate}, Qty: {qty})")
                     await place_order(upstox_symbol, qty, "SELL", state["access_token"])
+async def shutdown_scheduler():
+    """Timer task that automatically flattens all positions and suspends trading after 5 hours."""
+    print("[SYSTEM] 5-hour operational timer started.")
+    await asyncio.sleep(5 * 3600)  # Sleep for 5 hours (18,000 seconds)
+    print("[SYSTEM] 5 hours elapsed. Initiating automated position flattening and suspension...")
+    
+    # 1. Suspend trading so no new orders are placed
+    state["trading_allowed"] = False
+    
+    # 2. Flush / Flatten all active watchlist positions
+    brain = state["brain"]
+    if brain:
+        for yf_symbol in brain.watch_symbols:
+            upstox_symbol = Config.SYMBOL_MAP.get(yf_symbol)
+            if upstox_symbol:
+                print(f"[SYSTEM] Auto-flattening {upstox_symbol} before suspension.")
+                await flatten_positions_for_symbol(upstox_symbol, state["access_token"])
+                
+    print("[SYSTEM] Automated trading suspended. Final trade logs are locked on the dashboard.")
 
 @app.on_event("startup")
 async def startup_event():
@@ -139,6 +158,9 @@ async def startup_event():
         asyncio.create_task(monitor_virtual_positions())
         
     asyncio.create_task(automated_execution_loop(feed, technicals, brain))
+    
+    # 8. Start 5-hour automatic shutdown timer
+    asyncio.create_task(shutdown_scheduler())
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_dashboard():
