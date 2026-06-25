@@ -1,0 +1,16 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Credentials & Sessions
+.env
+.session.json
+
+# Local database
+trading.db
+
+# Virtual Environments
+.venv/
+venv/
+ENV/

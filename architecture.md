@@ -5,11 +5,12 @@ Welcome to the **Stock Tool** system architecture document. This file acts as th
 ---
 
 ## 1. System Goals & Context
-* **Objective:** An automated, self-executing trading tool for Indian retail stock markets.
+* **Objective:** An automated, self-executing trading tool for Indian retail stock markets (focusing on high-volume Intraday trading).
 * **Target Brokers:** Upstox (primary) and Zerodha (secondary capability).
 * **Speed:** Low execution latency (45ms to 120ms total loop time) achieved via regional cloud deployment and WebSocket streaming.
 * **Cost:** 100% free infrastructure and API usage.
 * **Security:** 100% secure storage of 2FA secrets, local order databases, and isolated execution scopes.
+* **Phase 1 Mode:** Virtual / Paper Trading Mode (simulating orders using live WebSocket price feeds and local SQLite logging).
 
 ---
 
@@ -22,7 +23,8 @@ Welcome to the **Stock Tool** system architecture document. This file acts as th
 | **Web Server** | FastAPI & Uvicorn | $0 | Async-first, high performance, low footprint API to trigger trades. |
 | **Database** | SQLite3 | $0 | Zero-setup, file-based SQL database, perfect for local position and order logging. |
 | **Auth Automation** | `pyotp` (Python TOTP library) | $0 | Eliminates the need for Selenium or headless browsers to solve 2FA login. |
-| **Hosting** | AWS Free Tier (EC2 ap-south-1) | $0 (Trial) | Located in Mumbai to keep ping latency to Upstox/Zerodha engines under 10ms. |
+| **Hosting (Phase 1)** | Local Laptop | $0 | Running locally for initial testing and virtual paper trading. |
+| **Hosting (Phase 2)** | AWS Free Tier (EC2 ap-south-1) | $0 (Trial) | Located in Mumbai to keep ping latency to Upstox/Zerodha engines under 10ms. |
 
 ---
 
@@ -76,7 +78,7 @@ Welcome to the **Stock Tool** system architecture document. This file acts as th
 1. **Startup (8:45 AM):** The background service boots up. It programmatically gets the latest TOTP token via `pyotp` and performs an HTTP session login flow to grab the daily `access_token` from Upstox.
 2. **Streaming (9:00 AM):** The WebSocket feed starts. It streams ticks and updates a fast, in-memory cache of live quotes.
 3. **Execution Ready (9:15 AM):** FastAPI server is live and listening.
-4. **Triggering Trades:** The trade signal component (the Brain) posts a request to `/execute`. The engine runs safety limits (checks if daily loss limits are exceeded), formats the payload, and posts directly to Upstox via a persistent connection pool. It then saves logs to `trading.db`.
+4. **Triggering Trades (Virtual Mode):** The trade signal component (the Brain) posts a request to `/execute`. The engine runs safety checks (daily loss and transaction limits), retrieves the current market price from the in-memory WebSocket price cache, and saves a `VIRTUAL_OPEN` order log directly to `trading.db`. The system tracks active positions in real-time and executes mock sells when stop-loss or take-profit price levels are crossed.
 
 ---
 
