@@ -102,3 +102,14 @@ Or trigger from the dashboard: **Backtest Lab** tab → select symbol/interval/p
 *   **Max Capital Per Trade:** The value of a single trade (LTP * Quantity) cannot exceed `MAX_CAPITAL_PER_TRADE`.
 *   **TOTP Automation:** Headlessly handles mornings via `pyotp` (free, secure authentication).
 *   **5-Minute Cooldown:** Prevents repeated orders on the same symbol within 300 seconds.
+
+---
+
+## 6. Deployment & Database Persistence
+
+The system is configured for cloud deployment to support 24/7 execution without requiring a personal computer to stay active.
+
+*   **Docker Containerization:** A standard [Dockerfile](file:///e:/Antigravity/Workspaces/Stcok%20Agent/Dockerfile) is defined to run the FastAPI server on port `8000`.
+*   **Database Path Override:** The SQLite connection looks up the `DATABASE_PATH` environment variable. By default, it points to local `trading.db`.
+*   **Persistent Storage:** When deploying to platforms like Railway or Render, a persistent volume should be mounted (e.g., at `/data/trading.db`) to prevent losing simulation history or daily statistics during container updates or restarts.
+
