@@ -5,7 +5,7 @@ from datetime import date
 DATABASE_FILE = os.getenv("DATABASE_PATH", "trading.db")
 
 def get_connection():
-    return sqlite3.connect(DATABASE_FILE)
+    return sqlite3.connect(DATABASE_FILE, timeout=10)
 
 def init_db():
     conn = get_connection()
