@@ -1,5 +1,6 @@
 import asyncio
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from src.config import Config
 from src.db import init_db, start_day_stats, get_connection, get_realized_pnl
@@ -11,10 +12,13 @@ from src.brain import BrainEngine
 
 app = FastAPI(title="Stock Tool Execution Engine", description="Minimalistic, low-latency automated trading bridge for Upstox")
 
-# Cache to store runtime session token
+# Cache to store runtime session token and engines
 state = {
     "access_token": None,
-    "trading_allowed": True
+    "trading_allowed": True,
+    "technicals": None,
+    "brain": None,
+    "feed": None
 }
 
 class OrderRequest(BaseModel):
@@ -32,15 +36,13 @@ async def automated_execution_loop(feed: MarketFeed, technicals: TechnicalEngine
     tick_queue = feed.subscribe()
     
     # 2. Start Warm Path (Technicals)
-    technicals = TechnicalEngine(market_feed, orders)
-    asyncio.create_task(technicals.start())
+    asyncio.create_task(technicals.run(tick_queue))
     
     # 3. Start Cold Path (Brain)
-    brain = BrainEngine()
     asyncio.create_task(brain.poll_rss_feeds())
-    asyncio.create_task(brain.analyze_sentiment("RELIANCE.NS"))
+    asyncio.create_task(brain.run())
     
-    # Execution Loop (Runs in main thread logic)ed an order for a symbol to avoid spamming
+    # Execution Loop (Runs in main thread logic) to avoid spamming orders
     last_trade = {}
     
     while True:
@@ -105,6 +107,7 @@ async def startup_event():
     # 4. Start WebSocket Market Feed cache
     feed = MarketFeed()
     await feed.start()
+    state["feed"] = feed
     
     # 5. Sync Hot Path Cache for open positions
     sync_open_positions()
@@ -112,6 +115,8 @@ async def startup_event():
     # 6. Start Engines
     technicals = TechnicalEngine()
     brain = BrainEngine()
+    state["technicals"] = technicals
+    state["brain"] = brain
     
     # 7. Start background loops
     if Config.TRADING_MODE == "VIRTUAL":
@@ -119,15 +124,31 @@ async def startup_event():
         
     asyncio.create_task(automated_execution_loop(feed, technicals, brain))
 
-@app.get("/")
-async def status_dashboard():
-    """Returns the current trading status and realized metrics."""
+@app.get("/", response_class=HTMLResponse)
+async def serve_dashboard():
+    """Serves the real-time trading dashboard HTML page."""
+    try:
+        with open("src/static/index.html", "r", encoding="utf-8") as f:
+            html_content = f.read()
+        return HTMLResponse(content=html_content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load dashboard: {e}")
+
+@app.get("/api/status")
+async def status_api():
+    """Returns the current trading status, realized metrics, signals, and macro headlines."""
+    brain = state.get("brain")
+    technicals = state.get("technicals")
+    
     return {
         "status": "active" if state["trading_allowed"] else "suspended",
         "trading_mode": Config.TRADING_MODE,
         "today_realized_pnl": get_realized_pnl(),
         "max_allowed_loss": Config.MAX_DAILY_LOSS,
-        "max_capital_per_trade": Config.MAX_CAPITAL_PER_TRADE
+        "max_capital_per_trade": Config.MAX_CAPITAL_PER_TRADE,
+        "gates": brain.gates if brain else {},
+        "signals": technicals.signals if technicals else {},
+        "global_headlines": brain.global_headlines if brain else []
     }
 
 @app.post("/execute")
