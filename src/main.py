@@ -120,7 +120,7 @@ async def startup_event():
     state["brain"] = brain
     
     # 7. Start background loops
-    if Config.TRADING_MODE == "VIRTUAL":
+    if Config.TRADING_MODE in ["VIRTUAL", "PAPER"]:
         asyncio.create_task(monitor_virtual_positions())
         
     asyncio.create_task(automated_execution_loop(feed, technicals, brain))

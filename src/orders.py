@@ -56,7 +56,7 @@ async def place_order(symbol: str, quantity: int, transaction_type: str, access_
             "reason": f"Trade value ({trade_value}) exceeds maximum allowed capital per trade ({Config.MAX_CAPITAL_PER_TRADE})"
         }
         
-    if Config.TRADING_MODE == "VIRTUAL":
+    if Config.TRADING_MODE in ["VIRTUAL", "PAPER"]:
         order_id = f"V-{uuid.uuid4().hex[:8].upper()}"
         
         # Calculate target and stop loss prices

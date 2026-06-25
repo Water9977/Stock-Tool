@@ -21,8 +21,8 @@ class Config:
     @classmethod
     def validate(cls):
         """Validates that credentials are set when running in live mode."""
-        if cls.TRADING_MODE == "LIVE":
+        if cls.TRADING_MODE in ["LIVE", "PAPER"]:
             missing = [k for k in ["CLIENT_ID", "CLIENT_SECRET", "MOBILE_NUMBER", "PIN", "TOTP_SECRET"] if not getattr(cls, k)]
             if missing:
-                raise ValueError(f"Missing required live trading credentials in .env: {', '.join(missing)}")
+                raise ValueError(f"Missing required live/paper trading credentials in .env: {', '.join(missing)}")
         return True
