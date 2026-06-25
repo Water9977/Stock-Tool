@@ -671,6 +671,7 @@
             <div class="tabs-header">
                 <button class="tab-btn active" onclick="switchTab('open-positions')">Open Positions (<span id="openPositionsCount">0</span>)</button>
                 <button class="tab-btn" onclick="switchTab('trade-history')">Trade History</button>
+                <button class="tab-btn" onclick="switchTab('backtest-panel')">🔬 Backtest Lab</button>
             </div>
             
             <!-- Open Positions Panel -->
@@ -726,6 +727,86 @@
                     </tbody>
                 </table>
             </div>
+
+            <!-- Backtest Lab Panel -->
+            <div id="backtest-panel" class="tab-panel">
+                <div style="padding: 1.5rem; display: flex; flex-direction: column; gap: 1.5rem;">
+
+                    <!-- Controls Row -->
+                    <div style="display: flex; gap: 1rem; align-items: flex-end; flex-wrap: wrap;">
+                        <div style="display: flex; flex-direction: column; gap: 0.4rem;">
+                            <label style="font-size: 0.75rem; color: var(--text-secondary); font-weight: 600;">SYMBOL</label>
+                            <select id="bt-symbol" style="background: rgba(255,255,255,0.05); border: 1px solid var(--card-border); color: var(--text-primary); padding: 0.6rem 1rem; border-radius: 8px; font-family: 'Inter', sans-serif; font-size: 0.875rem; min-width: 160px;">
+                                <option value="RELIANCE.NS">RELIANCE</option>
+                                <option value="TCS.NS">TCS</option>
+                                <option value="INFY.NS">INFY</option>
+                                <option value="SBIN.NS">SBIN</option>
+                                <option value="AXISBANK.NS">AXISBANK</option>
+                            </select>
+                        </div>
+                        <div style="display: flex; flex-direction: column; gap: 0.4rem;">
+                            <label style="font-size: 0.75rem; color: var(--text-secondary); font-weight: 600;">INTERVAL</label>
+                            <select id="bt-interval" style="background: rgba(255,255,255,0.05); border: 1px solid var(--card-border); color: var(--text-primary); padding: 0.6rem 1rem; border-radius: 8px; font-family: 'Inter', sans-serif; font-size: 0.875rem;">
+                                <option value="5m">5 Minutes</option>
+                                <option value="15m">15 Minutes</option>
+                                <option value="1h" selected>1 Hour</option>
+                                <option value="1d">1 Day</option>
+                            </select>
+                        </div>
+                        <div style="display: flex; flex-direction: column; gap: 0.4rem;">
+                            <label style="font-size: 0.75rem; color: var(--text-secondary); font-weight: 600;">PERIOD</label>
+                            <select id="bt-period" style="background: rgba(255,255,255,0.05); border: 1px solid var(--card-border); color: var(--text-primary); padding: 0.6rem 1rem; border-radius: 8px; font-family: 'Inter', sans-serif; font-size: 0.875rem;">
+                                <option value="5d">5 Days</option>
+                                <option value="1mo" selected>1 Month</option>
+                                <option value="3mo">3 Months</option>
+                                <option value="6mo">6 Months</option>
+                            </select>
+                        </div>
+                        <button id="bt-run-btn" onclick="runBacktest()" style="background: linear-gradient(135deg, #6366f1, #4f46e5); border: none; color: white; padding: 0.65rem 1.5rem; border-radius: 8px; font-family: 'Inter', sans-serif; font-weight: 600; font-size: 0.875rem; cursor: pointer; display: flex; align-items: center; gap: 0.5rem; transition: opacity 0.2s;">▶ Run Backtest</button>
+                    </div>
+
+                    <!-- Summary Cards -->
+                    <div id="bt-summary" style="display: none; gap: 1rem; grid-template-columns: repeat(4, 1fr); grid-template-rows: auto;" class="metrics-grid">
+                        <div class="glass-card" style="text-align: center;">
+                            <span class="metric-label">Total Trades</span>
+                            <span id="bt-total" class="metric-value">—</span>
+                        </div>
+                        <div class="glass-card" style="text-align: center;">
+                            <span class="metric-label">Win Rate</span>
+                            <span id="bt-winrate" class="metric-value">—</span>
+                        </div>
+                        <div class="glass-card" style="text-align: center;">
+                            <span class="metric-label">Total P&L</span>
+                            <span id="bt-pnl" class="metric-value">—</span>
+                        </div>
+                        <div class="glass-card" style="text-align: center;">
+                            <span class="metric-label">Wins / Losses</span>
+                            <span id="bt-wl" class="metric-value">—</span>
+                        </div>
+                    </div>
+
+                    <!-- Trade Log -->
+                    <div id="bt-log-wrap" style="display: none;">
+                        <h3 style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 0.75rem; letter-spacing: 0.05em;">TRADE LOG (Last 20 trades)</h3>
+                        <table class="positions-table">
+                            <thead>
+                                <tr>
+                                    <th>Entry Time</th>
+                                    <th>Side</th>
+                                    <th>Entry ₹</th>
+                                    <th>Exit ₹</th>
+                                    <th>P&L</th>
+                                    <th>Reason</th>
+                                </tr>
+                            </thead>
+                            <tbody id="bt-tbody"></tbody>
+                        </table>
+                    </div>
+
+                    <div id="bt-status" style="color: var(--text-secondary); font-size: 0.875rem;">Select parameters and click Run Backtest to analyze historical performance.</div>
+                </div>
+            </div>
+
         </section>
     </main>
 
@@ -1059,6 +1140,77 @@
             // Show panel
             const panel = document.getElementById(tabId);
             if (panel) panel.classList.add('active');
+        }
+
+        // ── Backtest Lab ──────────────────────────────────────────────
+        async function runBacktest() {
+            const symbol = document.getElementById('bt-symbol').value;
+            const interval = document.getElementById('bt-interval').value;
+            const period = document.getElementById('bt-period').value;
+            const btn = document.getElementById('bt-run-btn');
+            const status = document.getElementById('bt-status');
+            const summary = document.getElementById('bt-summary');
+            const logWrap = document.getElementById('bt-log-wrap');
+
+            btn.disabled = true;
+            btn.textContent = '⏳ Running...';
+            status.textContent = `Downloading ${symbol} (${interval} / ${period}) and running strategy replay...`;
+            summary.style.display = 'none';
+            logWrap.style.display = 'none';
+
+            try {
+                const res = await fetch('/backtest', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ symbol, interval, period })
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    status.textContent = `❌ Error: ${data.detail || 'Unknown error'}`;
+                    return;
+                }
+
+                // Show summary
+                document.getElementById('bt-total').textContent = data.total_trades;
+                const winratePct = data.win_rate_pct;
+                document.getElementById('bt-winrate').textContent = `${winratePct}%`;
+                document.getElementById('bt-winrate').style.color = winratePct >= 50 ? 'var(--success)' : 'var(--danger)';
+
+                const pnl = data.total_pnl;
+                const pnlEl = document.getElementById('bt-pnl');
+                pnlEl.textContent = `₹${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}`;
+                pnlEl.style.color = pnl >= 0 ? 'var(--success)' : 'var(--danger)';
+
+                document.getElementById('bt-wl').textContent = `${data.wins}W / ${data.losses}L`;
+                summary.style.display = 'grid';
+
+                // Show trade log
+                const tbody = document.getElementById('bt-tbody');
+                let html = '';
+                data.trades.forEach(t => {
+                    const sideClass = t.side === 'BUY' ? 'badge-buy' : 'badge-sell';
+                    const pnlClass = t.pnl >= 0 ? 'text-success' : 'text-danger';
+                    html += `
+                        <tr>
+                            <td style="color: var(--text-secondary); font-size: 0.8rem;">${t.entry_time}</td>
+                            <td><span class="badge ${sideClass}">${t.side}</span></td>
+                            <td>₹${t.entry_price.toFixed(2)}</td>
+                            <td>₹${t.exit_price.toFixed(2)}</td>
+                            <td class="text-bold" style="color: ${t.pnl >= 0 ? 'var(--success)' : 'var(--danger)'}">₹${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(2)}</td>
+                            <td style="color: var(--text-secondary); font-size: 0.8rem;">${t.reason}</td>
+                        </tr>
+                    `;
+                });
+                tbody.innerHTML = html;
+                logWrap.style.display = 'block';
+                status.textContent = `✅ Backtest complete — ${data.total_trades} trades over ${period} of ${symbol} (${interval} bars)`;
+
+            } catch (e) {
+                status.textContent = `❌ Network error: ${e.message}`;
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '▶ Run Backtest';
+            }
         }
 
         // Poll every 1.5 seconds

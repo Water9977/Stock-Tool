@@ -1,94 +1,298 @@
+"""
+Market Feed (Phase 2)
+=====================
+Handles both VIRTUAL (random walk simulator) and LIVE (Upstox V3 WebSocket + Protobuf) modes.
+
+LIVE MODE SETUP:
+  1. The upstox-python-sdk ships with MarketDataFeedV3_pb2.py inside the package.
+     We import it dynamically at runtime so we don't need to run protoc manually.
+  2. Authorization flow:
+     GET /feed/market-data-feed/authorize  -> returns authorizedRedirectUri (wss://)
+     CONNECT wss://...                     -> binary protobuf stream
+     SEND JSON subscription message        -> ticks start arriving
+"""
 import asyncio
-import random
-import websockets
 import json
+import random
+import ssl
+import httpx
+import websockets
 from src.config import Config
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Instrument keys (Upstox format)
+# ─────────────────────────────────────────────────────────────────────────────
+INSTRUMENT_KEYS = [
+    "NSE_EQ|INE002A01018",  # RELIANCE
+    "NSE_EQ|INE467B01029",  # TCS
+    "NSE_EQ|INE009A01021",  # INFY
+    "NSE_EQ|INE062A01020",  # SBIN
+    "NSE_EQ|INE238A01034",  # AXISBANK
+]
+
+# Base LTP seeds for virtual mode (realistic NSE prices)
+_BASE_PRICES = {
+    "NSE_EQ|INE002A01018": 2450.0,
+    "NSE_EQ|INE467B01029": 3300.0,
+    "NSE_EQ|INE009A01021": 1500.0,
+    "NSE_EQ|INE062A01020": 580.0,
+    "NSE_EQ|INE238A01034": 2600.0,
+}
+
+
+def _load_proto_module():
+    """
+    Imports the Upstox Protobuf V3 module bundled inside upstox-python-sdk.
+    Confirmed path: upstox_client.feeder.proto.MarketDataFeedV3_pb2
+
+    FeedResponse fields : type, feeds (map<str,Feed>), currentTs, marketInfo
+    Feed fields         : ltpc (LTPC), fullFeed (FullFeed), requestMode
+    LTPC fields         : ltp, ltt, ltq, cp
+    FullFeed fields     : marketFF (MarketFullFeed), indexFF
+    MarketFullFeed      : ltpc, marketLevel, marketOHLC, atp, vtt, oi, ...
+    """
+    try:
+        from upstox_client.feeder.proto import MarketDataFeedV3_pb2 as pb2
+        return pb2
+    except ImportError:
+        pass
+
+    return None
+
+
 class MarketFeed:
+    """
+    Singleton price-feed broker for the trading engine.
+
+    Modes:
+        VIRTUAL — Random-walk price simulator (no credentials needed)
+        LIVE    — Real Upstox V3 WebSocket feed via Protobuf binary decoding
+    """
     _instance = None
 
     def __new__(cls, *args, **kwargs):
         if not cls._instance:
             cls._instance = super(MarketFeed, cls).__new__(cls, *args, **kwargs)
-            cls._instance.price_cache = {
-                "NSE_EQ|INE002A01018": 2450.0,  # RELIANCE
-                "NSE_EQ|INE467B01029": 3300.0,  # TCS
-                "NSE_EQ|INE009A01021": 1500.0,  # INFY
-                "NSE_EQ|INE062A01020": 580.0,   # SBIN
-                "NSE_EQ|INE238A01034": 2600.0,  # Axis Bank
-            }
+            cls._instance.price_cache = dict(_BASE_PRICES)   # LTP cache
             cls._instance.is_running = False
             cls._instance.tick_queues = []
+            cls._instance._access_token = None
         return cls._instance
+
+    def set_access_token(self, token: str):
+        """Called after authentication to provide the bearer token for LIVE mode."""
+        self._access_token = token
 
     def subscribe(self) -> asyncio.Queue:
         """Returns a bounded queue for consuming ticks (used by Warm Path)."""
-        q = asyncio.Queue(maxsize=100) # Bounded to allow shedding if consumer is slow
+        q = asyncio.Queue(maxsize=200)
         self.tick_queues.append(q)
         return q
 
     async def _broadcast_tick(self, symbol: str, price: float):
-        """Sends tick to all subscribers (Warm Path). Drops tick if queue is full."""
+        """Sends a tick to all subscribers. Drops tick silently if a subscriber queue is full."""
         tick = {"symbol": symbol, "price": price}
         for q in self.tick_queues:
             try:
                 q.put_nowait(tick)
             except asyncio.QueueFull:
-                pass # Tick shedding: drop intermediate ticks if the consumer (talipp) is lagging
+                pass   # Tick shedding — never block the feed
 
     async def start(self):
         """Starts the price feed background worker."""
         if self.is_running:
             return
         self.is_running = True
-        
+
         if Config.TRADING_MODE == "VIRTUAL":
             asyncio.create_task(self._run_virtual_simulator())
         else:
             asyncio.create_task(self._run_live_feed())
 
+    # ─────────────────────────────────────────────────────────────────────────
+    #  VIRTUAL MODE
+    # ─────────────────────────────────────────────────────────────────────────
     async def _run_virtual_simulator(self):
-        """Simulates market price movements in real-time (random walk)."""
-        print("Starting VIRTUAL market feed simulator...")
+        """Simulates realistic intraday price movements (random walk with drift)."""
+        print("[FEED] Starting VIRTUAL market feed simulator...")
         while self.is_running:
-            # Simulate a tick update every 1 second
             await asyncio.sleep(1.0)
             for symbol in list(self.price_cache.keys()):
                 old_price = self.price_cache[symbol]
-                # Random walk: small percentage change between -0.08% and +0.08%
-                pct_change = random.uniform(-0.0008, 0.0008)
+                # Small percentage change: -0.08% to +0.08% per second
+                pct_change = random.gauss(0.0, 0.0004)
                 new_price = round(old_price * (1 + pct_change), 2)
                 self.price_cache[symbol] = new_price
-                
-                # Forward to Hot Path exits and Warm Path indicators
                 await self._broadcast_tick(symbol, new_price)
-            
-            # Print a quick snapshot of simulated prices (optional debug log)
-            # print(f"Simulator ticks: RELIANCE: {self.price_cache['NSE_EQ|INE002A01018']}")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  LIVE MODE — Upstox V3 WebSocket + Protobuf
+    # ─────────────────────────────────────────────────────────────────────────
+    async def _get_authorized_uri(self) -> str | None:
+        """
+        Calls Upstox REST API to get the authorized WebSocket redirect URI.
+        Returns the 'authorizedRedirectUri' string on success, None on failure.
+        """
+        if not self._access_token:
+            print("[FEED] ERROR: No access token available. Cannot authorize WebSocket.")
+            return None
+
+        url = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
+        headers = {
+            "Authorization": f"Bearer {self._access_token}",
+            "Accept": "application/json",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, headers=headers)
+                if response.status_code != 200:
+                    print(f"[FEED] Authorization failed: HTTP {response.status_code} — {response.text}")
+                    return None
+                data = response.json()
+                uri = data.get("data", {}).get("authorizedRedirectUri")
+                if not uri:
+                    print(f"[FEED] Authorization response missing URI: {data}")
+                    return None
+                print(f"[FEED] WebSocket authorized. URI: {uri[:60]}...")
+                return uri
+        except Exception as e:
+            print(f"[FEED] Exception during WebSocket authorization: {e}")
+            return None
+
+    def _build_subscription_message(self) -> str:
+        """Builds the JSON subscription request payload per Upstox V3 spec."""
+        return json.dumps({
+            "guid": "stock-tool-feed-v1",
+            "method": "sub",
+            "data": {
+                "instrumentKeys": INSTRUMENT_KEYS,
+                "mode": "full",   # full = OHLCV + depth; ltpc = LTP only (lower bandwidth)
+            }
+        })
+
+    def _decode_protobuf_tick(self, raw_bytes: bytes, pb2_module) -> list[dict]:
+        """
+        Decodes a binary Protobuf V3 frame into a list of price ticks.
+        Returns list of {symbol, price} dicts.
+
+        Proto structure (verified against upstox_client.feeder.proto.MarketDataFeedV3_pb2):
+          FeedResponse.feeds  -> map<string, Feed>
+          Feed.fullFeed       -> FullFeed  (for 'full' mode subscriptions)
+          FullFeed.marketFF   -> MarketFullFeed
+          MarketFullFeed.ltpc -> LTPC
+          LTPC.ltp            -> float (Last Traded Price)
+          Feed.ltpc           -> LTPC  (direct, for 'ltpc' mode subscriptions)
+        """
+        ticks = []
+        try:
+            feed_response = pb2_module.FeedResponse()
+            feed_response.ParseFromString(raw_bytes)
+
+            for key, feed in feed_response.feeds.items():
+                ltp = 0.0
+
+                # 'full' subscription mode — equity instruments
+                if feed.HasField("fullFeed"):
+                    ff = feed.fullFeed
+                    if ff.HasField("marketFF") and ff.marketFF.HasField("ltpc"):
+                        ltp = ff.marketFF.ltpc.ltp
+                    elif ff.HasField("indexFF") and ff.indexFF.HasField("ltpc"):
+                        ltp = ff.indexFF.ltpc.ltp
+
+                # 'ltpc' subscription mode — lightweight LTP-only
+                elif feed.HasField("ltpc"):
+                    ltp = feed.ltpc.ltp
+
+                if ltp and ltp > 0:
+                    ticks.append({"symbol": key, "price": float(ltp)})
+
+        except Exception as e:
+            print(f"[FEED] Protobuf decode error: {e}")
+        return ticks
 
     async def _run_live_feed(self):
-        """Connects to real Upstox WebSocket using Protobuf (LIVE mode)."""
-        print("Connecting to live Upstox WebSocket feed...")
-        # Since Upstox uses binary Protocol Buffers (Protobuf) for V2/V3,
-        # live mode requires compiling MarketDataFeed.proto using protoc.
-        # This acts as the structural foundation for connecting when LIVE is enabled.
-        url = "wss://api.upstox.com/v2/feed/market-data-feed"
-        headers = {"Authorization": f"Bearer mock_or_real_token"}
-        
+        """
+        Connects to the real Upstox V3 WebSocket market data feed.
+        Handles reconnection with exponential back-off.
+        """
+        pb2 = _load_proto_module()
+        if pb2 is None:
+            print("[FEED] WARNING: upstox-python-sdk Protobuf module not found.")
+            print("[FEED] Install it: pip install upstox-python-sdk")
+            print("[FEED] Falling back to VIRTUAL simulator for safety.")
+            await self._run_virtual_simulator()
+            return
+
+        print("[FEED] Protobuf module loaded. Connecting to Upstox live feed...")
+        retry_delay = 5  # seconds
+
         while self.is_running:
             try:
-                # The auth token must be passed in headers.
-                # In Upstox, you must call a redirect authorization REST API first 
-                # to get the authorized websocket endpoint.
-                print("Live market feed connection loop starting...")
-                await asyncio.sleep(5) # Stub retry delay
-            except Exception as e:
-                print(f"Error in Live WebSocket loop: {e}")
-                await asyncio.sleep(5)
+                authorized_uri = await self._get_authorized_uri()
+                if not authorized_uri:
+                    print(f"[FEED] Will retry authorization in {retry_delay}s...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 60)
+                    continue
 
+                # Build SSL context — Upstox WSS uses standard TLS
+                ssl_context = ssl.create_default_context()
+
+                async with websockets.connect(
+                    authorized_uri,
+                    ssl=ssl_context,
+                    ping_interval=20,
+                    ping_timeout=10,
+                ) as ws:
+                    print("[FEED] WebSocket connected. Sending subscription request...")
+                    await ws.send(self._build_subscription_message())
+                    print(f"[FEED] Subscribed to {len(INSTRUMENT_KEYS)} instruments.")
+                    retry_delay = 5   # reset on successful connect
+
+                    async for message in ws:
+                        if not self.is_running:
+                            break
+
+                        # All frames from Upstox V3 are binary Protobuf
+                        if isinstance(message, bytes):
+                            ticks = self._decode_protobuf_tick(message, pb2)
+                            for tick in ticks:
+                                symbol = tick["symbol"]
+                                price = tick["price"]
+                                # Update LTP cache (Hot Path)
+                                self.price_cache[symbol] = price
+                                # Broadcast to Warm Path indicator queues
+                                await self._broadcast_tick(symbol, price)
+
+                        elif isinstance(message, str):
+                            # Upstox sometimes sends a JSON heartbeat/status message
+                            try:
+                                payload = json.loads(message)
+                                if payload.get("type") == "error":
+                                    print(f"[FEED] Server error: {payload}")
+                            except json.JSONDecodeError:
+                                pass
+
+            except websockets.exceptions.ConnectionClosedOK:
+                print("[FEED] WebSocket closed normally. Reconnecting...")
+            except websockets.exceptions.ConnectionClosedError as e:
+                print(f"[FEED] WebSocket connection dropped: {e}. Reconnecting in {retry_delay}s...")
+            except Exception as e:
+                print(f"[FEED] Unexpected error in live feed: {e}. Retrying in {retry_delay}s...")
+
+            if self.is_running:
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 60)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  Helpers
+    # ─────────────────────────────────────────────────────────────────────────
     def get_price(self, symbol: str) -> float:
-        """Helper to get the current Last Traded Price (LTP)."""
-        return self.price_cache.get(symbol, 100.0)
+        """Returns the current Last Traded Price (LTP) from the in-memory cache."""
+        return self.price_cache.get(symbol, 0.0)
 
     def stop(self):
+        """Gracefully stops the feed background worker."""
         self.is_running = False
+        print("[FEED] Market feed stopped.")

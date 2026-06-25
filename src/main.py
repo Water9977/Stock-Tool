@@ -106,6 +106,7 @@ async def startup_event():
 
     # 4. Start WebSocket Market Feed cache
     feed = MarketFeed()
+    feed.set_access_token(state["access_token"])  # Wire token for LIVE mode
     await feed.start()
     state["feed"] = feed
     
@@ -192,8 +193,97 @@ async def get_portfolio():
     finally:
         conn.close()
 
+
 @app.get("/prices")
 async def get_latest_prices():
     """Retrieves current in-memory stock quotes."""
     feed = MarketFeed()
     return feed.price_cache
+
+
+class BacktestRequest(BaseModel):
+    symbol: str = "RELIANCE.NS"
+    interval: str = "5m"
+    period: str = "5d"
+
+
+@app.post("/backtest")
+async def trigger_backtest(req: BacktestRequest):
+    """
+    Runs a historical backtest for the given symbol and returns P&L metrics.
+    Accepts Yahoo Finance ticker symbols (e.g. 'RELIANCE.NS', 'TCS.NS').
+    Supported intervals: 1m, 5m, 15m, 1h, 1d
+    Supported periods : 1d, 5d, 1mo, 3mo, 6mo, 1y
+    """
+    from src.backtest import BacktestResult, SYMBOL_MAP
+
+    symbol = req.symbol
+    interval = req.interval
+    period = req.period
+
+    try:
+        import yfinance as yf
+        from src.technicals import TechnicalEngine
+
+        upstox_symbol = SYMBOL_MAP.get(symbol, f"NSE_EQ|{symbol.replace('.NS', '')}")
+        df = await asyncio.to_thread(
+            lambda: yf.download(symbol, interval=interval, period=period, progress=False, auto_adjust=True)
+        )
+        if df.empty:
+            raise HTTPException(status_code=400, detail="No historical data found for this symbol/period.")
+
+        if hasattr(df.columns, 'levels'):
+            df.columns = df.columns.droplevel(1)
+
+        result = BacktestResult(symbol)
+        technicals = TechnicalEngine()
+        tick_queue = asyncio.Queue()
+        engine_task = asyncio.create_task(technicals.run(tick_queue))
+        TARGET_PCT, SL_PCT = 0.02, 0.01
+
+        for ts, row in df.iterrows():
+            close_price = float(row["Close"])
+            timestamp = ts.strftime("%Y-%m-%d %H:%M") if hasattr(ts, 'strftime') else str(ts)
+            await tick_queue.put({"symbol": upstox_symbol, "price": close_price})
+            await asyncio.sleep(0)
+            signal = technicals.get_signal(upstox_symbol)
+
+            if result.open_trade is not None:
+                entry = result.open_trade["entry_price"]
+                side = result.open_trade["side"]
+                if side == "BUY":
+                    if close_price >= entry * (1 + TARGET_PCT):
+                        result.close_position(close_price, timestamp, "Target Hit")
+                    elif close_price <= entry * (1 - SL_PCT):
+                        result.close_position(close_price, timestamp, "Stop Loss")
+                else:
+                    if close_price <= entry * (1 - TARGET_PCT):
+                        result.close_position(close_price, timestamp, "Target Hit")
+                    elif close_price >= entry * (1 + SL_PCT):
+                        result.close_position(close_price, timestamp, "Stop Loss")
+
+            if result.open_trade is None and signal in ["BUY", "SELL"]:
+                result.open_position(close_price, signal, timestamp)
+
+        if result.open_trade is not None:
+            last_price = float(df["Close"].iloc[-1])
+            result.close_position(last_price, "end", "EOD Force Close")
+
+        engine_task.cancel()
+        total = result.wins + result.losses
+        win_rate = round(result.wins / total * 100, 1) if total else 0.0
+        return {
+            "symbol": symbol,
+            "interval": interval,
+            "period": period,
+            "total_trades": total,
+            "wins": result.wins,
+            "losses": result.losses,
+            "win_rate_pct": win_rate,
+            "total_pnl": round(result.total_pnl, 2),
+            "trades": result.trades[-20:]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Backtest failed: {str(e)}")
