@@ -1,7 +1,8 @@
 import sqlite3
+import os
 from datetime import date
 
-DATABASE_FILE = "trading.db"
+DATABASE_FILE = os.getenv("DATABASE_PATH", "trading.db")
 
 def get_connection():
     return sqlite3.connect(DATABASE_FILE)

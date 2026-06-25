@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: stock-trading-terminal
+    runtime: docker
+    dockerfilePath: Dockerfile
+    plan: free
+    envVars:
+      - key: TRADING_MODE
+        value: VIRTUAL
+      - key: GEMINI_API_KEY
+        sync: false # User must set this manually in Render Settings
+      - key: DATABASE_PATH
+        value: /data/trading.db
+    # Note: Persistent disks require a paid Render instance ($7/month + disk fee).
+    # On the free tier, the database resets on restarts/deploys.
+    disk:
+      name: stock-data
+      mountPath: /data
+      sizeGB: 1
