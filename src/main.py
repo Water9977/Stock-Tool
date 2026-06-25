@@ -6,7 +6,7 @@ from src.config import Config
 from src.db import init_db, start_day_stats, get_connection, get_realized_pnl
 from src.auth import authenticate_upstox
 from src.market_feed import MarketFeed
-from src.orders import place_order, monitor_virtual_positions, sync_open_positions
+from src.orders import place_order, monitor_virtual_positions, sync_open_positions, flatten_positions_for_symbol
 from src.technicals import TechnicalEngine
 from src.brain import BrainEngine
 
@@ -55,24 +55,24 @@ async def automated_execution_loop(feed: MarketFeed, technicals: TechnicalEngine
         for yf_symbol in brain.watch_symbols:
             base_symbol = yf_symbol.replace(".NS", "")
             
-            # Find the corresponding Upstox symbol from price_cache
-            upstox_symbol = None
-            for s in feed.price_cache.keys():
-                if base_symbol in s:
-                    upstox_symbol = s
-                    break
-                    
+            # Find the corresponding Upstox symbol from Config.SYMBOL_MAP
+            upstox_symbol = Config.SYMBOL_MAP.get(yf_symbol)
             if not upstox_symbol:
                 continue
                 
-            # 1. Check Technical Signal (Warm Path)
+            # 1. Check AI Gate (Cold Path)
+            gate = brain.get_gate_status(base_symbol)
+            
+            # If the AI gate triggers FLATTEN, immediately exit all positions for this symbol
+            if gate == "FLATTEN":
+                await flatten_positions_for_symbol(upstox_symbol, state["access_token"])
+                continue
+                
+            # 2. Check Technical Signal (Warm Path)
             signal = technicals.get_signal(upstox_symbol)
             if signal == "NEUTRAL":
                 continue
                 
-            # 2. Check AI Gate (Cold Path)
-            gate = brain.get_gate_status(base_symbol)
-            
             # Match Signal with Gate
             if signal == "BUY" and gate in ["ALLOW_BUY", "ALLOW_ALL"]:
                 if last_trade.get(upstox_symbol, 0) > asyncio.get_event_loop().time() - 300: # 5 mins cooldown
@@ -280,7 +280,9 @@ async def trigger_backtest(req: BacktestRequest):
             "wins": result.wins,
             "losses": result.losses,
             "win_rate_pct": win_rate,
-            "total_pnl": round(result.total_pnl, 2),
+            "total_gross_pnl": round(result.total_gross_pnl, 2),
+            "total_charges": round(result.total_charges, 2),
+            "total_pnl": round(result.total_net_pnl, 2),
             "trades": result.trades[-20:]
         }
     except HTTPException:

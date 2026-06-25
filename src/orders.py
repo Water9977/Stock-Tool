@@ -97,13 +97,17 @@ async def place_order(symbol: str, quantity: int, transaction_type: str, access_
             "quantity": quantity,
             "mode": "VIRTUAL"
         }
-    else:
-        # LIVE Trading order placement
+        # LIVE Trading order placement (Upstox V3 API)
         import httpx
-        url = "https://api.upstox.com/v2/order/place"
-        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+        url = "https://api.upstox.com/v3/order/place"
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-Algo-Name": "AntigravityStockAgent"
+        }
         
-        # Format payload according to Upstox API
+        # Format payload according to Upstox V3 API
         payload = {
             "quantity": quantity,
             "product": "I", # Intraday
@@ -112,7 +116,11 @@ async def place_order(symbol: str, quantity: int, transaction_type: str, access_
             "tag": "agent-trade",
             "instrument_token": symbol,
             "order_type": "MARKET",
-            "transaction_type": transaction_type
+            "transaction_type": transaction_type,
+            "disclosed_quantity": 0,
+            "trigger_price": 0.0,
+            "is_amo": False,
+            "slice": False
         }
         
         async with httpx.AsyncClient() as client:
@@ -204,3 +212,73 @@ async def monitor_virtual_positions():
                 print(f"Error updating DB for closed positions: {e}")
             finally:
                 conn.close()
+
+async def flatten_positions_for_symbol(symbol: str, access_token: str):
+    """
+    Closes all open positions for a given symbol immediately at current market price.
+    Used for emergency FLATTEN signals from AI sentiment.
+    """
+    feed = MarketFeed()
+    current_price = feed.get_price(symbol)
+    if current_price is None:
+        print(f"[FLATTEN] Could not get price for {symbol}, aborting flatten.")
+        return
+
+    if Config.TRADING_MODE in ["VIRTUAL", "PAPER"]:
+        # Find all open virtual positions for this symbol
+        to_close = []
+        for order_id, pos in list(_open_positions.items()):
+            if pos["symbol"] == symbol:
+                to_close.append((order_id, pos))
+        
+        if not to_close:
+            return
+            
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            for order_id, pos in to_close:
+                qty = pos["quantity"]
+                entry = pos["entry_price"]
+                direction = pos["transaction_type"]
+                
+                if direction == "BUY":
+                    pnl = round((current_price - entry) * qty, 2)
+                else:  # SELL (short)
+                    pnl = round((entry - current_price) * qty, 2)
+                    
+                # Remove from memory cache immediately
+                del _open_positions[order_id]
+                
+                # Update DB
+                cursor.execute(
+                    "UPDATE orders SET status = 'VIRTUAL_CLOSED', price = ? WHERE id = ?",
+                    (current_price, order_id)
+                )
+                update_realized_pnl(pnl)
+                print(f"[FLATTEN] Emergency closed VIRTUAL position {order_id} for {symbol} at Rs.{current_price}. P&L: Rs.{pnl:+}")
+            conn.commit()
+        except Exception as e:
+            print(f"[FLATTEN ERROR] Failed to close virtual positions: {e}")
+        finally:
+            conn.close()
+    else:
+        # LIVE Mode: Query SQLite for open submitted live trades to offset
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT id, quantity, transaction_type FROM orders WHERE symbol = ? AND status = 'LIVE_SUBMITTED'", (symbol,))
+            rows = cursor.fetchall()
+            for row in rows:
+                order_id, quantity, direction = row
+                opposite_action = "SELL" if direction == "BUY" else "BUY"
+                print(f"[FLATTEN] Emergency placing offsetting LIVE order: {opposite_action} {quantity} shares of {symbol}")
+                await place_order(symbol, quantity, opposite_action, access_token)
+                
+                # Mark as closed in local DB
+                cursor.execute("UPDATE orders SET status = 'LIVE_CLOSED' WHERE id = ?", (order_id,))
+            conn.commit()
+        except Exception as e:
+            print(f"[FLATTEN ERROR] Failed to close live positions: {e}")
+        finally:
+            conn.close()

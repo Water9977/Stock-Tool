@@ -37,34 +37,99 @@ SYMBOL_MAP = {
 
 
 class BacktestResult:
-    """Accumulates P&L, trade log, and summary stats from a backtest run."""
+    """Accumulates P&L, transaction costs, trade log, and net stats from a backtest run."""
 
-    def __init__(self, symbol: str):
+    def __init__(self, symbol: str, qty: int = 10, slippage_pct: float = 0.0005):
         self.symbol = symbol
-        self.trades = []           # list of dicts: {entry, exit, side, pnl}
+        self.qty = qty
+        self.slippage_pct = slippage_pct
+        self.trades = []           # list of dicts: {entry_time, exit_time, side, entry_price, exit_price, gross_pnl, charges, net_pnl, reason}
         self.open_trade = None     # currently open position
-        self.total_pnl = 0.0
+        self.total_gross_pnl = 0.0
+        self.total_charges = 0.0
+        self.total_net_pnl = 0.0
         self.wins = 0
         self.losses = 0
 
     def open_position(self, price: float, side: str, timestamp):
         if self.open_trade is not None:
             return  # One position at a time
-        self.open_trade = {"entry_price": price, "side": side, "entry_time": timestamp}
+        
+        # Apply entry slippage penalty
+        if side == "BUY":
+            executed_price = round(price * (1 + self.slippage_pct), 2)
+        else: # SELL
+            executed_price = round(price * (1 - self.slippage_pct), 2)
+            
+        self.open_trade = {
+            "raw_entry_price": price,
+            "entry_price": executed_price,
+            "side": side,
+            "entry_time": timestamp
+        }
+
+    def _calculate_charges(self, buy_price: float, sell_price: float) -> float:
+        """
+        Calculates standard Upstox intraday equity transaction charges and govt taxes.
+        - Brokerage: 0.05% of turnover or Rs. 20 (whichever is lower) per execution.
+        - STT (Securities Transaction Tax): 0.025% on sell side.
+        - Exchange Transaction Charge (NSE): 0.00322% of total turnover.
+        - GST: 18% of (Brokerage + Exchange Charges).
+        - SEBI Turnover Fee: 0.0001% of total turnover.
+        - Stamp Duty: 0.003% on buy side.
+        """
+        buy_value = buy_price * self.qty
+        sell_value = sell_price * self.qty
+        turnover = buy_value + sell_value
+        
+        # 1. Brokerage
+        buy_brokerage = min(0.0005 * buy_value, 20.0)
+        sell_brokerage = min(0.0005 * sell_value, 20.0)
+        total_brokerage = buy_brokerage + sell_brokerage
+        
+        # 2. STT (0.025% on sell side)
+        stt = 0.00025 * sell_value
+        
+        # 3. Exchange Transaction Charges (0.00322% on total turnover)
+        exchange_charges = 0.0000322 * turnover
+        
+        # 4. GST (18% on brokerage + exchange charges)
+        gst = 0.18 * (total_brokerage + exchange_charges)
+        
+        # 5. SEBI Fee (0.0001% on total turnover)
+        sebi_fee = 0.000001 * turnover
+        
+        # 6. Stamp Duty (0.003% on buy side)
+        stamp_duty = 0.00003 * buy_value
+        
+        total_charges = total_brokerage + stt + exchange_charges + gst + sebi_fee + stamp_duty
+        return round(total_charges, 2)
 
     def close_position(self, price: float, timestamp, reason: str):
         if self.open_trade is None:
             return
+        
         entry = self.open_trade["entry_price"]
         side = self.open_trade["side"]
 
+        # Apply exit slippage penalty
         if side == "BUY":
-            pnl = round((price - entry) * 10, 2)   # 10 qty
-        else:
-            pnl = round((entry - price) * 10, 2)
+            executed_exit_price = round(price * (1 - self.slippage_pct), 2)
+            buy_price, sell_price = entry, executed_exit_price
+            gross_pnl = round((executed_exit_price - entry) * self.qty, 2)
+        else: # SELL (short)
+            executed_exit_price = round(price * (1 + self.slippage_pct), 2)
+            buy_price, sell_price = executed_exit_price, entry
+            gross_pnl = round((entry - executed_exit_price) * self.qty, 2)
 
-        self.total_pnl += pnl
-        if pnl > 0:
+        charges = self._calculate_charges(buy_price, sell_price)
+        net_pnl = round(gross_pnl - charges, 2)
+
+        self.total_gross_pnl += gross_pnl
+        self.total_charges += charges
+        self.total_net_pnl += net_pnl
+
+        if net_pnl > 0:
             self.wins += 1
         else:
             self.losses += 1
@@ -74,8 +139,11 @@ class BacktestResult:
             "exit_time": timestamp,
             "side": side,
             "entry_price": entry,
-            "exit_price": price,
-            "pnl": pnl,
+            "exit_price": executed_exit_price,
+            "gross_pnl": gross_pnl,
+            "charges": charges,
+            "net_pnl": net_pnl,
+            "pnl": net_pnl,   # For UI compatibility
             "reason": reason,
         })
         self.open_trade = None
@@ -84,24 +152,26 @@ class BacktestResult:
         total_trades = self.wins + self.losses
         win_rate = (self.wins / total_trades * 100) if total_trades else 0
         print("\n" + "=" * 60)
-        print(f"  BACKTEST RESULTS — {self.symbol}")
+        print(f"  BACKTEST RESULTS — {self.symbol} (Slippage: {self.slippage_pct*100:.3f}%)")
         print("=" * 60)
         print(f"  Total Trades  : {total_trades}")
         print(f"  Wins          : {self.wins}  |  Losses: {self.losses}")
         print(f"  Win Rate      : {win_rate:.1f}%")
-        print(f"  Total P&L     : Rs.{self.total_pnl:+.2f}")
+        print(f"  Gross P&L     : Rs.{self.total_gross_pnl:+.2f}")
+        print(f"  Total Charges : Rs.{self.total_charges:.2f} (STT/Stamp/GST/Brokerage)")
+        print(f"  Net P&L       : Rs.{self.total_net_pnl:+.2f}")
         if self.trades:
-            max_drawdown = min((t["pnl"] for t in self.trades), default=0.0)
+            max_drawdown = min((t["net_pnl"] for t in self.trades), default=0.0)
             print(f"  Max Drawdown  : Rs.{max_drawdown:.2f}")
         print("=" * 60)
         if self.trades:
             print("\n  Trade Log (last 10):")
             for t in self.trades[-10:]:
-                pnl_str = f"Rs.{t['pnl']:+.2f}"
                 print(
                     f"  [{t['entry_time']}] {t['side']:4s}  "
                     f"In: {t['entry_price']:.2f}  Out: {t['exit_price']:.2f}  "
-                    f"P&L: {pnl_str:>12s}  ({t['reason']})"
+                    f"Gross P&L: Rs.{t['gross_pnl']:+.2f}  Charges: Rs.{t['charges']:.2f}  "
+                    f"Net P&L: Rs.{t['net_pnl']:+.2f}  ({t['reason']})"
                 )
 
 

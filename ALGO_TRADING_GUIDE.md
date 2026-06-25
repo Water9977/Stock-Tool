@@ -10,11 +10,20 @@ Under the Securities and Exchange Board of India (SEBI) guidelines, automated tr
 
 ### Key Rules for Retail API Trading:
 1. **Static IP Whitelisting:** SEBI mandates that order execution via client APIs must originate only from whitelisted static IP addresses. If you run your agent on a cloud VPS (e.g., AWS EC2), you must allocate an Elastic IP (static) and register it in your Upstox/Kite Connect developer console. Requests from other IPs will be blocked.
-2. **Orders Per Second (OPS) Limit:** 
+2. **SEBI Algorithmic Trading Circular (February 4, 2025 Guidelines):**
+   * **Safeguard Enforcement:** Any retail algorithmic trading tool must incorporate system-level safety checks: daily maximum loss limits, per-trade capital allocation ceilings, and execution rate limiting (cooling periods) to mitigate runaway code risks.
+   * **Anti-Spam & Cooldowns:** To prevent market flooding, brokers reject rapid back-to-back duplicate orders. Algorithms must implement a cooldown (e.g., 5 minutes) per instrument.
+   * **Approved Algos vs. Retail APIs:** Retail investors using personal APIs for execution (under 10 Orders Per Second) do not require formal exchange approval, provided the execution runs purely on their own account and abides by broker risk-management filters.
+3. **Cloud Static IP Routing (QuotaGuard Static):**
+   If you deploy your Docker containers on dynamic cloud hosting platforms (like Render or Railway) that use rotating outbound IPs, your live trades will fail due to Upstox's static IP whitelisting check.
+   * **Solution:** Add a static proxy add-on (like **QuotaGuard Static**) in your Railway/Render settings.
+   * **Routing:** Configure your HTTP/HTTPS clients to route outbound requests directed at `https://api.upstox.com` through the QuotaGuard proxy URL (e.g. `http://user:pass@static-ip.quotaguard.com:9293`).
+   * **Whitelisting:** Copy the two static IPs provided by QuotaGuard and register them in the Upstox Developer Portal under your application's whitelisted IPs.
+4. **Orders Per Second (OPS) Limit:** 
    - **Under 10 OPS:** Retail accounts are permitted to place up to 10 orders per second. This is classified as standard retail API usage. It does not require formal exchange approval or algorithmic audits.
    - **10+ OPS:** Any execution exceeding 10 OPS is classified as High-Frequency Trading (HFT) and requires exchange approval, algorithmic testing, and a member-hosted server.
-3. **Mandatory 2FA/TOTP:** Standard password-only login is disabled. All API applications must use OAuth 2.0 with Time-Based One-Time Password (TOTP) 2-factor authentication.
-4. **Market Protection Order Limits:** Pure market orders without price protection (such as SL-M with zero slippage checks) are banned or heavily restricted by exchanges to prevent runaway executions. Limit orders or Stop-Loss Limit (SL-L) orders are recommended.
+5. **Mandatory 2FA/TOTP:** Standard password-only login is disabled. All API applications must use OAuth 2.0 with Time-Based One-Time Password (TOTP) 2-factor authentication.
+6. **Market Protection Order Limits:** Pure market orders without price protection (such as SL-M with zero slippage checks) are banned or heavily restricted by exchanges to prevent runaway executions. Limit orders or Stop-Loss Limit (SL-L) orders are recommended.
 
 ---
 

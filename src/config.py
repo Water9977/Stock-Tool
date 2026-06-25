@@ -17,6 +17,14 @@ class Config:
     MAX_CAPITAL_PER_TRADE = float(os.getenv("MAX_CAPITAL_PER_TRADE", 5000.0))
     
     TRADING_MODE = os.getenv("TRADING_MODE", "VIRTUAL").upper()
+    
+    SYMBOL_MAP = {
+        "RELIANCE.NS":  "NSE_EQ|INE002A01018",
+        "TCS.NS":       "NSE_EQ|INE467B01029",
+        "INFY.NS":      "NSE_EQ|INE009A01021",
+        "SBIN.NS":      "NSE_EQ|INE062A01020",
+        "AXISBANK.NS":  "NSE_EQ|INE238A01034",
+    }
 
     @classmethod
     def validate(cls):

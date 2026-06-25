@@ -48,14 +48,30 @@ Since LLMs are constrained by inference speeds (1–3 seconds minimum), they can
 *   **Engine:** Uses the `talipp` library for incremental computations, updating indicators like RSI (Relative Strength Index) and MACD (Moving Average Convergence Divergence) on each candle close.
 *   **Shedding:** If tick queues fill during high volatility, a shedding mechanism drops intermediate ticks to keep indicators current.
 
-### 🟦 COLD PATH (The AI Sentiment Gate)
+### 🟦 COLD PATH (The AI Sentiment Gate & Safety Guardrails)
 *   **Latency Budget:** 1–15 seconds.
-*   **Role:** Gating mechanism that approves or vetoes signals.
+*   **Role:** An asynchronous risk-veto and macro-guardrail gate. 
+*   **Strategy Clarity (Hybrid Guardrail):** The AI does *not* directly choose or execute entries. Instead, the core technical indicators (RSI/MACD in the Warm Path) generate baseline signals, and the AI acts as a slow-moving filter. It scans news and macro feeds every 30 seconds to approve, block (`VETO`), or force-close (`FLATTEN`) trades based on market sentiment.
 *   **Data Aggregators:**
     *   **`yfinance`:** Free ticker-based news (e.g. `RELIANCE.NS`).
     *   **Livemint Markets RSS:** Free macro market sentiment news fetched asynchronously using `aiohttp` and `feedparser`.
-*   **AI Engine:** Queries `gemini-3.1-flash-lite` via the Google AI Studio free tier. Returns a structured JSON output enforcing a strict schema (`ALLOW_BUY`, `ALLOW_SELL`, `ALLOW_ALL`, `VETO`, or `FLATTEN`).
-*   **Safety Switch:** If Gemini returns `ALLOW_ALL`, technical indicators are trusted entirely. If it returns `FLATTEN`, it triggers an immediate exit of the position.
+*   **AI Engine:** Queries `gemini-1.5-flash` (or `gemini-3.1-flash-lite` once fully registered). Returns a structured JSON output enforcing a strict schema (`ALLOW_BUY`, `ALLOW_SELL`, `ALLOW_ALL`, `VETO`, or `FLATTEN`).
+*   **FLATTEN Safety Switch:** If Gemini detects a major negative catalyst (e.g., fraudulent earnings, regulatory bans, macro crashes), it returns a `FLATTEN` gate. In the next evaluator tick, `main.py` immediately intercepts this status, bypasses regular entry loops, and calls `flatten_positions_for_symbol` to place emergency market exit orders for any active holdings on that ticker.
+
+---
+
+## 3. Regulatory Compliance & Network Architecture
+
+### SEBI Algorithmic Trading Guidelines (February 4, 2025 Updates)
+Under SEBI guidelines, retail algorithmic trading via APIs must incorporate strict risk-management and system safeguards to ensure market orderliness:
+1. **Pre-Trade Risk Management:** Our engine implements automated capital limits (`MAX_CAPITAL_PER_TRADE`) and maximum loss limits (`MAX_DAILY_LOSS`) enforced at the database level.
+2. **Order Placement Cooldowns:** A mandatory 5-minute (300 seconds) cooldown is enforced per symbol to prevent runaway execution loops or rapid order spamming.
+3. **Execution Compliance:** Automatic target profits (2%) and stop losses (1%) are monitored continuously in-memory to prevent open-ended exposure.
+
+### Static IP Whitelisting Constraints
+* **Mandatory Broker Whitelisting:** Upstox mandates that all order placement, modification, and cancellation requests originate from registered static IP addresses. Requests from dynamic or unregistered IPs are immediately blocked.
+* **Cloud NAT Gateway Routing:** When deploying in container environments (e.g. Railway or Render) that use rotating outbound IPs, the application must route all traffic destined for `api.upstox.com` through a **Static IP Proxy** (such as QuotaGuard Static or an AWS NAT Gateway). This static IP must be registered in the Upstox Developer Console.
+
 
 
 ---
