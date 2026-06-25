@@ -57,10 +57,48 @@ Since LLMs are constrained by inference speeds (1–3 seconds minimum), they can
 *   **AI Engine:** Queries `gemini-3.1-flash-lite` via the Google AI Studio free tier. Returns a structured JSON output enforcing a strict schema (`ALLOW_BUY`, `ALLOW_SELL`, `ALLOW_ALL`, `VETO`, or `FLATTEN`).
 *   **Safety Switch:** If Gemini returns `ALLOW_ALL`, technical indicators are trusted entirely. If it returns `FLATTEN`, it triggers an immediate exit of the position.
 
+
 ---
 
-## 3. Financial Safety Configurations
+## 4. Phase 2 Additions (Live Feed + Backtesting)
+
+### Module Status
+
+| Module | Status | Description |
+|--------|--------|-------------|
+| `src/market_feed.py` | ✅ Phase 2 | **LIVE:** Upstox V3 WebSocket + Protobuf decode via `upstox_client.feeder.proto.MarketDataFeedV3_pb2`. Exponential back-off reconnection. **VIRTUAL:** Random-walk Gaussian simulator. |
+| `src/backtest.py` | ✅ Phase 2 | Downloads real NSE OHLCV data from Yahoo Finance. Feeds tick-by-tick through TechnicalEngine. Reports: Win Rate, P&L, Max Drawdown, trade-by-trade log. |
+| `src/technicals.py` | ✅ Stable | RSI(14) + MACD(12,26,9) via `talipp`. Signal thresholds: RSI < 35 = BUY, RSI > 65 = SELL. |
+| `src/brain.py` | ✅ Stable | Gemini sentiment gating + Livemint RSS aggregation. |
+| `src/orders.py` | ✅ Stable | VIRTUAL: SQLite. LIVE: Upstox `/order/place` REST API. |
+| `src/auth.py` | ✅ Stable | Programmatic TOTP login for daily token refresh. |
+
+### Live WebSocket Authorization Flow
+
+```
+1. POST /auth/callback  →  access_token stored
+2. feed.set_access_token(token)
+3. GET  /v3/feed/market-data-feed/authorize  →  authorizedRedirectUri (wss://)
+4. CONNECT wss://...   (binary protobuf stream)
+5. SEND JSON: { method: "sub", data: { instrumentKeys: [...], mode: "full" } }
+6. RECV binary frames  →  FeedResponse.ParseFromString()
+7. FeedResponse.feeds[key].fullFeed.marketFF.ltpc.ltp  →  price_cache update
+```
+
+### Backtesting CLI
+
+```bash
+python src/backtest.py --symbol RELIANCE.NS --interval 1h --period 1mo
+python src/backtest.py --symbol TCS.NS      --interval 5m  --period 5d
+```
+
+Or trigger from the dashboard: **Backtest Lab** tab → select symbol/interval/period → **▶ Run Backtest**.
+
+---
+
+## 5. Financial Safety Configurations
 
 *   **Max Daily Loss:** Realized P&L is checked at the database level. If losses exceed `MAX_DAILY_LOSS` (e.g. Rs. 2,000), the app suspends all operations.
 *   **Max Capital Per Trade:** The value of a single trade (LTP * Quantity) cannot exceed `MAX_CAPITAL_PER_TRADE`.
-*   **TOTP Automation:** headlessly handles mornings via `pyotp` (free, secure authentication).
+*   **TOTP Automation:** Headlessly handles mornings via `pyotp` (free, secure authentication).
+*   **5-Minute Cooldown:** Prevents repeated orders on the same symbol within 300 seconds.
