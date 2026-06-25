@@ -12,9 +12,9 @@ class Config:
     MOBILE_NUMBER = os.getenv("UPSTOX_MOBILE_NUMBER")
     PIN = os.getenv("UPSTOX_PIN")
     TOTP_SECRET = os.getenv("UPSTOX_TOTP_SECRET")
-    
-    MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", 2000.0))
-    MAX_CAPITAL_PER_TRADE = float(os.getenv("MAX_CAPITAL_PER_TRADE", 5000.0))
+    STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", 2000.0))
+    MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", 500.0))
+    MAX_CAPITAL_PER_TRADE = float(os.getenv("MAX_CAPITAL_PER_TRADE", 2000.0))
     
     TRADING_MODE = os.getenv("TRADING_MODE", "VIRTUAL").upper()
     

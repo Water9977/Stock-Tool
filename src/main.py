@@ -74,27 +74,42 @@ async def automated_execution_loop(feed: MarketFeed, technicals: TechnicalEngine
                 continue
                 
             # Match Signal with Gate
-            if signal == "BUY" and gate in ["ALLOW_BUY", "ALLOW_ALL"]:
+            if signal in ["BUY", "SELL"]:
                 if last_trade.get(upstox_symbol, 0) > asyncio.get_event_loop().time() - 300: # 5 mins cooldown
                     continue
-                last_trade[upstox_symbol] = asyncio.get_event_loop().time()
-                print(f"[EXECUTION] Automated BUY triggered for {upstox_symbol} (Signal: {signal}, Gate: {gate})")
-                await place_order(upstox_symbol, 10, "BUY", state["access_token"])
                 
-            elif signal == "SELL" and gate in ["ALLOW_SELL", "ALLOW_ALL"]:
-                if last_trade.get(upstox_symbol, 0) > asyncio.get_event_loop().time() - 300:
+                # Get current price to calculate dynamic quantity
+                current_price = state["feed"].get_price(upstox_symbol)
+                if not current_price or current_price <= 0:
                     continue
-                last_trade[upstox_symbol] = asyncio.get_event_loop().time()
-                print(f"[EXECUTION] Automated SELL triggered for {upstox_symbol} (Signal: {signal}, Gate: {gate})")
-                await place_order(upstox_symbol, 10, "SELL", state["access_token"])
+                    
+                # Calculate dynamic quantity based on available balance and trade capital limit
+                from src.orders import get_available_balance
+                available_balance = get_available_balance()
+                trade_capital = min(Config.MAX_CAPITAL_PER_TRADE, available_balance)
+                qty = int(trade_capital / current_price)
+                
+                if qty <= 0:
+                    print(f"[EXECUTION] Signal {signal} for {upstox_symbol} bypassed: insufficient balance (Price: Rs.{current_price:.2f}, Available: Rs.{available_balance:.2f})")
+                    continue
+                
+                if signal == "BUY" and gate in ["ALLOW_BUY", "ALLOW_ALL"]:
+                    last_trade[upstox_symbol] = asyncio.get_event_loop().time()
+                    print(f"[EXECUTION] Automated BUY triggered for {upstox_symbol} (Signal: {signal}, Gate: {gate}, Qty: {qty})")
+                    await place_order(upstox_symbol, qty, "BUY", state["access_token"])
+                    
+                elif signal == "SELL" and gate in ["ALLOW_SELL", "ALLOW_ALL"]:
+                    last_trade[upstox_symbol] = asyncio.get_event_loop().time()
+                    print(f"[EXECUTION] Automated SELL triggered for {upstox_symbol} (Signal: {signal}, Gate: {gate}, Qty: {qty})")
+                    await place_order(upstox_symbol, qty, "SELL", state["access_token"])
 
 @app.on_event("startup")
 async def startup_event():
     # 1. Initialize SQLite Database
     init_db()
     
-    # 2. Setup today's starting stats (₹1,00,000 virtual balance)
-    start_day_stats(100000.0)
+    # 2. Setup today's starting stats (loaded from config)
+    start_day_stats(Config.STARTING_CAPITAL)
     
     # 3. Retrieve daily access token (programmatic login)
     try:

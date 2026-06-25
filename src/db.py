@@ -40,7 +40,7 @@ def init_db():
     conn.close()
     print("Database tables initialized successfully.")
 
-def start_day_stats(starting_capital: float = 100000.0):
+def start_day_stats(starting_capital: float = 2000.0):
     """Initializes daily stats for today if not already present."""
     today_str = date.today().isoformat()
     conn = get_connection()
@@ -77,5 +77,17 @@ def update_realized_pnl(amount: float):
             (amount, today_str)
         )
         conn.commit()
+    finally:
+        conn.close()
+
+def get_starting_capital() -> float:
+    """Returns today's starting capital."""
+    today_str = date.today().isoformat()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT starting_capital FROM daily_stats WHERE date = ?", (today_str,))
+        row = cursor.fetchone()
+        return row[0] if row else 2000.0
     finally:
         conn.close()

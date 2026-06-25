@@ -17,7 +17,7 @@ async def test_pipeline():
     # 2. Initialize Database
     print("Initializing SQLite Database...")
     init_db()
-    start_day_stats(100000.0)
+    start_day_stats(Config.STARTING_CAPITAL)
     print("[OK] Database initialized.")
 
     # 3. Test Authentication
@@ -33,14 +33,14 @@ async def test_pipeline():
     await asyncio.sleep(1.0) # Wait for simulator to tick
     
     # Check simulated stock price
-    reliance_price = feed.get_price("NSE_EQ|INE002A01018")
-    print(f"[OK] Simulated price for RELIANCE (LTP): Rs. {reliance_price}")
-    assert reliance_price > 0, "Price should be greater than 0"
+    sbin_price = feed.get_price("NSE_EQ|INE062A01020")
+    print(f"[OK] Simulated price for SBIN (LTP): Rs. {sbin_price}")
+    assert sbin_price > 0, "Price should be greater than 0"
 
     # 5. Place a simulated order
-    print("Placing a simulated BUY order for 1 share of RELIANCE...")
+    print("Placing a simulated BUY order for 1 share of SBIN...")
     res = await place_order(
-        symbol="NSE_EQ|INE002A01018",
+        symbol="NSE_EQ|INE062A01020",
         quantity=1,
         transaction_type="BUY",
         access_token=token,

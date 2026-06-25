@@ -63,7 +63,7 @@ STOCK-SPECIFIC HEADLINES for {yf_symbol}:
                         
                         response = await asyncio.to_thread(
                             self.client.models.generate_content,
-                            model='gemini-1.5-flash', # Note: Using flash currently available until gemini-3.1-flash-lite identifier is confirmed/updated via API
+                            model='gemini-3-flash-preview',
                             contents=prompt,
                             config={
                                 'response_mime_type': 'application/json',
