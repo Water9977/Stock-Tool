@@ -1,89 +1,66 @@
-# Stock Tool - System Architecture
+# Master AI Brain Architecture: Three-Path Execution Model
 
-Welcome to the **Stock Tool** system architecture document. This file acts as the primary "Truth Engine" and documentation hub for our autonomous trading system. It is kept up-to-date with every architectural update.
-
----
-
-## 1. System Goals & Context
-* **Objective:** An automated, self-executing trading tool for Indian retail stock markets (focusing on high-volume Intraday trading).
-* **Target Brokers:** Upstox (primary) and Zerodha (secondary capability).
-* **Speed:** Low execution latency (45ms to 120ms total loop time) achieved via regional cloud deployment and WebSocket streaming.
-* **Cost:** 100% free infrastructure and API usage.
-* **Security:** 100% secure storage of 2FA secrets, local order databases, and isolated execution scopes.
-* **Phase 1 Mode:** Virtual / Paper Trading Mode (simulating orders using live WebSocket price feeds and local SQLite logging).
+This document serves as the absolute "Truth Engine" for the Stock Tool system design. It outlines the decoupled, asynchronous architecture separating hot-path execution, warm-path technical calculations, and cold-path AI sentiment analysis using Gemini 3.1 Flash-Lite.
 
 ---
 
-## 2. Technology Stack & Cost Profile
+## 1. The Core Paradigm: Decoupled Loops
 
-| Component | Technology Choice | Cost | Justification |
-| :--- | :--- | :--- | :--- |
-| **Language** | Python 3.11+ | $0 | Standard for quantitative analysis, data processing, and broker SDKs. |
-| **Execution Broker** | Upstox API v2 | $0 | Upstox offers 100% free API subscriptions (including live data feeds) for retail users. |
-| **Web Server** | FastAPI & Uvicorn | $0 | Async-first, high performance, low footprint API to trigger trades. |
-| **Database** | SQLite3 | $0 | Zero-setup, file-based SQL database, perfect for local position and order logging. |
-| **Auth Automation** | `pyotp` (Python TOTP library) | $0 | Eliminates the need for Selenium or headless browsers to solve 2FA login. |
-| **Hosting (Phase 1)** | Local Laptop | $0 | Running locally for initial testing and virtual paper trading. |
-| **Hosting (Phase 2)** | AWS Free Tier (EC2 ap-south-1) | $0 (Trial) | Located in Mumbai to keep ping latency to Upstox/Zerodha engines under 10ms. |
-
----
-
-## 3. High-Level Application Flow
+Since LLMs are constrained by inference speeds (1–3 seconds minimum), they cannot live in the execution loops of high-frequency or retail intraday trading (which require sub-second executions). The engine is strictly divided into three asynchronous paths with bounded latency budgets.
 
 ```
-                      +-----------------------------+
-                      |         Cron Scheduler      | (Daily at 8:45 AM)
-                      +--------------+--------------+
-                                     |
-                                     ▼
-                      +-----------------------------+
-                      |    Automated TOTP Login     | (pyotp + requests)
-                      +--------------+--------------+
-                                     |
-                                     ▼
-                      +-----------------------------+
-                      |    Store access_token       | (Saved to local .session.json)
-                      +--------------+--------------+
-                                     |
-                                     ▼
-                      +-----------------------------+
-                      |     Start WebSocket Feed    | (Keep-alive price streaming)
-                      +--------------+--------------+
-                                     |
-                                     ▼
-+---------------------+       +------+--------------+
-|     The "Brain"     |       |   In-Memory Price   |
-|  (Technical/News    |       |        Cache        |
-|  Research Engine)   |       +------+--------------+
-+----------+----------+              |
-           |                         |
-           | (HTTP POST /execute)    | (Matches criteria)
-           ▼                         ▼
-+---------------------+       +---------------------+
-|  FastAPI Endpoints  |------>|   Safety Controls   | (Max loss / Size checks)
-+---------------------+       +------+--------------+
-                                     |
-                                     ▼
-                              +------+--------------+
-                              | Upstox Order API    | (Execute Trade)
-                              +------+--------------+
-                                     |
-                                     ▼
-                              +------+--------------+
-                              |  Local SQLite DB    | (Log Execution Status)
-                              +---------------------+
++--------------------------------------------------------------------------------+
+|                                    HOT PATH                                    |
+|   [Upstox V3 WS Feed] ---> [In-Memory Price Cache] ---> [SL / TP Exit Engine]  |
+|   Latency: <10ms | Database: None | I/O: None | LLM: None                       |
++--------------------------------------------------------------------------------+
+                                       |
+                                       | (Async Queue Ticks)
+                                       ▼
++--------------------------------------------------------------------------------+
+|                                   WARM PATH                                    |
+|   [Tick Queue] ---> [talipp Indicator Engine] ---> [Baseline Buy/Sell Signals] |
+|   Latency: 10-100ms | Calculations: RSI, MACD, EMAs                            |
++--------------------------------------------------------------------------------+
+                                       |
+                     (Approved Trade Gate Check + Conviction)
+                                       ▼
++--------------------------------------------------------------------------------+
+|                                   COLD PATH                                    |
+|   [yfinance RSS + Custom Indian Portals] ---> [gemini-3.1-flash-lite]          |
+|   Latency: 1-15s | Outputs: Conviction Score, Action Gate (ALLOW/VETO)         |
++--------------------------------------------------------------------------------+
 ```
-
-### Steps:
-1. **Startup (8:45 AM):** The background service boots up. It programmatically gets the latest TOTP token via `pyotp` and performs an HTTP session login flow to grab the daily `access_token` from Upstox.
-2. **Streaming (9:00 AM):** The WebSocket feed starts. It streams ticks and updates a fast, in-memory cache of live quotes.
-3. **Execution Ready (9:15 AM):** FastAPI server is live and listening.
-4. **Triggering Trades (Virtual Mode):** The trade signal component (the Brain) posts a request to `/execute`. The engine runs safety checks (daily loss and transaction limits), retrieves the current market price from the in-memory WebSocket price cache, and saves a `VIRTUAL_OPEN` order log directly to `trading.db`. The system tracks active positions in real-time and executes mock sells when stop-loss or take-profit price levels are crossed.
 
 ---
 
-## 4. Security Framework
-* **No hardcoded secrets:** Credentials (Client ID, Secret, Mobile, Pin, TOTP Secret) are loaded exclusively via environment variables using a `.env` file.
-* **Isolated Environment:** The application runs inside a virtual environment (`venv`).
-* **IP Whitelisting:** Orders will only be accepted from the whitelisted static Elastic IP of our hosting server.
-* **Risk Engine (Safety Switch):** Max daily loss ceiling is checked before *any* order placement. If hit, the engine suspends trading and sends a notification.
+## 2. Path Detail Specifications
+
+### 🟥 HOT PATH (Execution Core & Exits)
+*   **Latency Budget:** < 10ms.
+*   **Role:** Real-time quote streaming and emergency position exits.
+*   **Safety Rule:** This loop must never run blockages. No print logs to disk, no file reads, no external API calls, and no LLMs.
+*   **Exits:** It continuously cross-checks active database positions (loaded in-memory on startup) against the WebSocket price cache. If a stop-loss (SL) or target-profit (TP) threshold is crossed, it fires an exit order instantly.
+
+### 🟨 WARM PATH (Technical Calculations)
+*   **Latency Budget:** 10–100ms.
+*   **Role:** Processes ticks to update technical indicators and generate signals.
+*   **Engine:** Uses the `talipp` library for incremental computations, updating indicators like RSI (Relative Strength Index) and MACD (Moving Average Convergence Divergence) on each candle close.
+*   **Shedding:** If tick queues fill during high volatility, a shedding mechanism drops intermediate ticks to keep indicators current.
+
+### 🟦 COLD PATH (The AI Sentiment Gate)
+*   **Latency Budget:** 1–15 seconds.
+*   **Role:** Gating mechanism that approves or vetoes signals.
+*   **Data Aggregators:**
+    *   **`yfinance`:** Free ticker-based news (e.g. `RELIANCE.NS`).
+    *   **Livemint Markets RSS:** Free macro market sentiment news fetched asynchronously using `aiohttp` and `feedparser`.
+*   **AI Engine:** Queries `gemini-3.1-flash-lite` via the Google AI Studio free tier. Returns a structured JSON output enforcing a strict schema (`ALLOW_BUY`, `ALLOW_SELL`, `ALLOW_ALL`, `VETO`, or `FLATTEN`).
+*   **Safety Switch:** If Gemini returns `ALLOW_ALL`, technical indicators are trusted entirely. If it returns `FLATTEN`, it triggers an immediate exit of the position.
+
+---
+
+## 3. Financial Safety Configurations
+
+*   **Max Daily Loss:** Realized P&L is checked at the database level. If losses exceed `MAX_DAILY_LOSS` (e.g. Rs. 2,000), the app suspends all operations.
+*   **Max Capital Per Trade:** The value of a single trade (LTP * Quantity) cannot exceed `MAX_CAPITAL_PER_TRADE`.
+*   **TOTP Automation:** headlessly handles mornings via `pyotp` (free, secure authentication).

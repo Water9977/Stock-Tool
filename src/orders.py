@@ -5,6 +5,30 @@ from src.config import Config
 from src.db import get_connection, get_realized_pnl, update_realized_pnl
 from src.market_feed import MarketFeed
 
+# In-memory Hot Path cache for open virtual positions
+_open_positions = {}
+
+def sync_open_positions():
+    """Initializes the Hot Path cache from SQLite on startup."""
+    global _open_positions
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT id, symbol, quantity, price, target, stop_loss, transaction_type FROM orders WHERE status = 'VIRTUAL_OPEN'")
+        for row in cursor.fetchall():
+            order_id, symbol, quantity, entry_price, target, stop_loss, transaction_type = row
+            _open_positions[order_id] = {
+                "symbol": symbol,
+                "quantity": quantity,
+                "entry_price": entry_price,
+                "target": target,
+                "stop_loss": stop_loss,
+                "transaction_type": transaction_type
+            }
+        print(f"Hot Path Cache Synced: {_open_positions}")
+    finally:
+        conn.close()
+
 async def place_order(symbol: str, quantity: int, transaction_type: str, access_token: str, target_pct: float = 0.02, sl_pct: float = 0.01) -> dict:
     """
     Places a virtual or live trade.
@@ -51,6 +75,16 @@ async def place_order(symbol: str, quantity: int, transaction_type: str, access_
                 (order_id, symbol, quantity, current_price, target_price, stop_loss_price, "MARKET", transaction_type, "VIRTUAL_OPEN")
             )
             conn.commit()
+            
+            # Hot Path update
+            _open_positions[order_id] = {
+                "symbol": symbol,
+                "quantity": quantity,
+                "entry_price": current_price,
+                "target": target_price,
+                "stop_loss": stop_loss_price,
+                "transaction_type": transaction_type
+            }
         finally:
             conn.close()
             
@@ -104,53 +138,69 @@ async def place_order(symbol: str, quantity: int, transaction_type: str, access_
             return {"status": "SUBMITTED", "order_id": order_id, "mode": "LIVE"}
 
 async def monitor_virtual_positions():
-    """Background loop that watches open virtual positions and resolves target / stop losses."""
+    """Hot Path Background loop: watches open virtual positions and resolves target / stop losses purely in-memory (O(1) execution time limit)."""
     feed = MarketFeed()
-    print("Starting background virtual position monitor...")
+    print("Starting background virtual position monitor (Hot Path)...")
     
     while True:
-        await asyncio.sleep(1.0)
-        conn = get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute("SELECT id, symbol, quantity, price, target, stop_loss, transaction_type FROM orders WHERE status = 'VIRTUAL_OPEN'")
-            open_positions = cursor.fetchall()
+        await asyncio.sleep(0.1) # Check 10 times a second
+        
+        closed_orders = []
+        for order_id, pos in list(_open_positions.items()):
+            current_price = feed.get_price(pos["symbol"])
+            if current_price is None:
+                continue
+                
+            target = pos["target"]
+            stop_loss = pos["stop_loss"]
+            entry_price = pos["entry_price"]
+            quantity = pos["quantity"]
+            transaction_type = pos["transaction_type"]
+            symbol = pos["symbol"]
             
-            for order_id, symbol, quantity, entry_price, target, stop_loss, transaction_type in open_positions:
-                current_price = feed.get_price(symbol)
-                trade_pnl = 0.0
-                triggered = False
-                trigger_reason = ""
+            trade_pnl = 0.0
+            triggered = False
+            trigger_reason = ""
 
-                if transaction_type == "BUY":
-                    if current_price >= target:
-                        triggered = True
-                        trigger_reason = "Target Profit Hit"
-                        trade_pnl = (target - entry_price) * quantity
-                    elif current_price <= stop_loss:
-                        triggered = True
-                        trigger_reason = "Stop Loss Triggered"
-                        trade_pnl = (stop_loss - entry_price) * quantity
-                else:  # SELL (Short position)
-                    if current_price <= target:
-                        triggered = True
-                        trigger_reason = "Target Profit Hit"
-                        trade_pnl = (entry_price - target) * quantity
-                    elif current_price >= stop_loss:
-                        triggered = True
-                        trigger_reason = "Stop Loss Triggered"
-                        trade_pnl = (entry_price - stop_loss) * quantity
+            if transaction_type == "BUY":
+                if current_price >= target:
+                    triggered = True
+                    trigger_reason = "Target Profit Hit"
+                    trade_pnl = (target - entry_price) * quantity
+                elif current_price <= stop_loss:
+                    triggered = True
+                    trigger_reason = "Stop Loss Triggered"
+                    trade_pnl = (stop_loss - entry_price) * quantity
+            else:  # SELL (Short position)
+                if current_price <= target:
+                    triggered = True
+                    trigger_reason = "Target Profit Hit"
+                    trade_pnl = (entry_price - target) * quantity
+                elif current_price >= stop_loss:
+                    triggered = True
+                    trigger_reason = "Stop Loss Triggered"
+                    trade_pnl = (entry_price - stop_loss) * quantity
 
-                if triggered:
-                    trade_pnl = round(trade_pnl, 2)
+            if triggered:
+                trade_pnl = round(trade_pnl, 2)
+                # Remove from Hot Path immediately
+                del _open_positions[order_id]
+                closed_orders.append((order_id, current_price, trade_pnl, trigger_reason, symbol, entry_price))
+                
+        # Resolve DB asynchronously to prevent blocking Hot Path
+        if closed_orders:
+            conn = get_connection()
+            cursor = conn.cursor()
+            try:
+                for order_id, current_price, trade_pnl, trigger_reason, symbol, entry_price in closed_orders:
                     cursor.execute(
                         "UPDATE orders SET status = 'VIRTUAL_CLOSED', price = ? WHERE id = ?",
                         (current_price, order_id)
                     )
-                    conn.commit()
                     update_realized_pnl(trade_pnl)
                     print(f"[{trigger_reason}] Closed trade {order_id} for {symbol}. Entry: Rs.{entry_price}, Exit: Rs.{current_price}. Trade P&L: Rs.{trade_pnl:+}. Total realized today: Rs.{get_realized_pnl():+}")
-        except Exception as e:
-            print(f"Error in position monitor thread: {e}")
-        finally:
-            conn.close()
+                conn.commit()
+            except Exception as e:
+                print(f"Error updating DB for closed positions: {e}")
+            finally:
+                conn.close()

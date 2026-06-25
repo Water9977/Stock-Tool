@@ -18,7 +18,23 @@ class MarketFeed:
                 "NSE_EQ|INE238A01034": 2600.0,  # Axis Bank
             }
             cls._instance.is_running = False
+            cls._instance.tick_queues = []
         return cls._instance
+
+    def subscribe(self) -> asyncio.Queue:
+        """Returns a bounded queue for consuming ticks (used by Warm Path)."""
+        q = asyncio.Queue(maxsize=100) # Bounded to allow shedding if consumer is slow
+        self.tick_queues.append(q)
+        return q
+
+    async def _broadcast_tick(self, symbol: str, price: float):
+        """Sends tick to all subscribers (Warm Path). Drops tick if queue is full."""
+        tick = {"symbol": symbol, "price": price}
+        for q in self.tick_queues:
+            try:
+                q.put_nowait(tick)
+            except asyncio.QueueFull:
+                pass # Tick shedding: drop intermediate ticks if the consumer (talipp) is lagging
 
     async def start(self):
         """Starts the price feed background worker."""
@@ -43,6 +59,9 @@ class MarketFeed:
                 pct_change = random.uniform(-0.0008, 0.0008)
                 new_price = round(old_price * (1 + pct_change), 2)
                 self.price_cache[symbol] = new_price
+                
+                # Forward to Hot Path exits and Warm Path indicators
+                await self._broadcast_tick(symbol, new_price)
             
             # Print a quick snapshot of simulated prices (optional debug log)
             # print(f"Simulator ticks: RELIANCE: {self.price_cache['NSE_EQ|INE002A01018']}")

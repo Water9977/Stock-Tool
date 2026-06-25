@@ -5,7 +5,9 @@ from src.config import Config
 from src.db import init_db, start_day_stats, get_connection, get_realized_pnl
 from src.auth import authenticate_upstox
 from src.market_feed import MarketFeed
-from src.orders import place_order, monitor_virtual_positions
+from src.orders import place_order, monitor_virtual_positions, sync_open_positions
+from src.technicals import TechnicalEngine
+from src.brain import BrainEngine
 
 app = FastAPI(title="Stock Tool Execution Engine", description="Minimalistic, low-latency automated trading bridge for Upstox")
 
@@ -21,6 +23,68 @@ class OrderRequest(BaseModel):
     action: str = Field(..., description="Transaction action: 'BUY' or 'SELL'")
     target_pct: float = Field(default=0.02, description="Target Profit Percentage (e.g. 0.02 for 2%)")
     sl_pct: float = Field(default=0.01, description="Stop Loss Percentage (e.g. 0.01 for 1%)")
+
+async def automated_execution_loop(feed: MarketFeed, technicals: TechnicalEngine, brain: BrainEngine):
+    """The core decision engine connecting Hot, Warm, and Cold paths."""
+    print("Starting Automated Execution Loop...")
+    
+    # Get a subscriber queue from Hot Path for Technicals
+    tick_queue = feed.subscribe()
+    
+    # 2. Start Warm Path (Technicals)
+    technicals = TechnicalEngine(market_feed, orders)
+    asyncio.create_task(technicals.start())
+    
+    # 3. Start Cold Path (Brain)
+    brain = BrainEngine()
+    asyncio.create_task(brain.poll_rss_feeds())
+    asyncio.create_task(brain.analyze_sentiment("RELIANCE.NS"))
+    
+    # Execution Loop (Runs in main thread logic)ed an order for a symbol to avoid spamming
+    last_trade = {}
+    
+    while True:
+        await asyncio.sleep(1.0) # Evaluator loop runs every second
+        
+        # Only trade if system is allowed
+        if not state["trading_allowed"]:
+            continue
+            
+        for yf_symbol in brain.watch_symbols:
+            base_symbol = yf_symbol.replace(".NS", "")
+            
+            # Find the corresponding Upstox symbol from price_cache
+            upstox_symbol = None
+            for s in feed.price_cache.keys():
+                if base_symbol in s:
+                    upstox_symbol = s
+                    break
+                    
+            if not upstox_symbol:
+                continue
+                
+            # 1. Check Technical Signal (Warm Path)
+            signal = technicals.get_signal(upstox_symbol)
+            if signal == "NEUTRAL":
+                continue
+                
+            # 2. Check AI Gate (Cold Path)
+            gate = brain.get_gate_status(base_symbol)
+            
+            # Match Signal with Gate
+            if signal == "BUY" and gate in ["ALLOW_BUY", "ALLOW_ALL"]:
+                if last_trade.get(upstox_symbol, 0) > asyncio.get_event_loop().time() - 300: # 5 mins cooldown
+                    continue
+                last_trade[upstox_symbol] = asyncio.get_event_loop().time()
+                print(f"[EXECUTION] Automated BUY triggered for {upstox_symbol} (Signal: {signal}, Gate: {gate})")
+                await place_order(upstox_symbol, 10, "BUY", state["access_token"])
+                
+            elif signal == "SELL" and gate in ["ALLOW_SELL", "ALLOW_ALL"]:
+                if last_trade.get(upstox_symbol, 0) > asyncio.get_event_loop().time() - 300:
+                    continue
+                last_trade[upstox_symbol] = asyncio.get_event_loop().time()
+                print(f"[EXECUTION] Automated SELL triggered for {upstox_symbol} (Signal: {signal}, Gate: {gate})")
+                await place_order(upstox_symbol, 10, "SELL", state["access_token"])
 
 @app.on_event("startup")
 async def startup_event():
@@ -42,9 +106,18 @@ async def startup_event():
     feed = MarketFeed()
     await feed.start()
     
-    # 5. Start background position monitor loop
+    # 5. Sync Hot Path Cache for open positions
+    sync_open_positions()
+    
+    # 6. Start Engines
+    technicals = TechnicalEngine()
+    brain = BrainEngine()
+    
+    # 7. Start background loops
     if Config.TRADING_MODE == "VIRTUAL":
         asyncio.create_task(monitor_virtual_positions())
+        
+    asyncio.create_task(automated_execution_loop(feed, technicals, brain))
 
 @app.get("/")
 async def status_dashboard():
