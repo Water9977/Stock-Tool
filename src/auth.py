@@ -10,8 +10,8 @@ async def authenticate_upstox() -> str:
     """
     Obtains the daily access token.
     If TRADING_MODE is VIRTUAL, returns a mock token.
-    If TRADING_MODE is LIVE, executes a manual OAuth login sequence
-    to comply with SEBI regulations.
+    If UPSTOX_ACCESS_TOKEN is set, uses it directly (skip OAuth browser dance).
+    Otherwise executes manual OAuth login sequence to comply with SEBI regulations.
     """
     if Config.TRADING_MODE == "VIRTUAL":
         mock_session = {
@@ -23,6 +23,12 @@ async def authenticate_upstox() -> str:
             json.dump(mock_session, f)
         print("Running in VIRTUAL mode. Mock token generated and saved.")
         return mock_session["access_token"]
+
+    # Fast path: pre-set daily token (generated manually at account.upstox.com/developer/apps)
+    preset_token = os.getenv("UPSTOX_ACCESS_TOKEN")
+    if preset_token:
+        print("UPSTOX_ACCESS_TOKEN found in env. Skipping OAuth flow.")
+        return preset_token
 
     # Check live credentials
     Config.validate()
