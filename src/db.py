@@ -106,3 +106,15 @@ def get_starting_capital() -> float:
         return row[0] if row else 2000.0
     finally:
         conn.close()
+
+def reset_simulation():
+    """Wipes all trade history and daily stats for a clean simulation start."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM orders")
+        cursor.execute("DELETE FROM daily_stats")
+        conn.commit()
+        print("[DB] Simulation reset: all orders and daily stats wiped.")
+    finally:
+        conn.close()

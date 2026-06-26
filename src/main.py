@@ -1,11 +1,12 @@
 import asyncio
+import os
 import pytz
 from datetime import datetime, time
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from src.config import Config
-from src.db import init_db, start_day_stats, get_connection, get_realized_pnl
+from src.db import init_db, start_day_stats, reset_simulation, get_connection, get_realized_pnl
 from src.auth import authenticate_upstox
 from src.market_feed import MarketFeed
 from src.orders import place_order, monitor_virtual_positions, sync_open_positions, flatten_positions_for_symbol
@@ -167,8 +168,13 @@ async def shutdown_scheduler():
 async def startup_event():
     # 1. Initialize SQLite Database
     init_db()
-    
-    # 2. Setup today's starting stats (loaded from config)
+
+    # 2. If RESET_ON_START=true, wipe all previous trade history first
+    if os.getenv("RESET_ON_START", "false").lower() == "true":
+        reset_simulation()
+        print("[SYSTEM] RESET_ON_START=true: clean slate started.")
+
+    # 3. Setup today's starting stats (loaded from config)
     start_day_stats(Config.STARTING_CAPITAL)
     
     # 3. Retrieve daily access token (programmatic login)
