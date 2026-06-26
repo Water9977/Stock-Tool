@@ -37,11 +37,15 @@ class TechnicalEngine:
             # Generate signals only if we have enough data (talipp lists are populated)
             if len(inds["rsi"]) >= 14 and len(inds["macd"]) >= 26:
                 current_rsi = inds["rsi"][-1]
-                # Simple condition: RSI < 35 (Oversold) -> Buy Signal
-                # RSI > 65 (Overbought) -> Sell Signal
-                if current_rsi < 35.0:
+                current_macd = inds["macd"][-1]
+                macd_line = current_macd.macd if current_macd else None
+                macd_signal = current_macd.signal if current_macd else None
+
+                # Confirmation condition: RSI < 35 (Oversold) AND MACD Line > MACD Signal -> Buy Signal
+                # RSI > 65 (Overbought) AND MACD Line < MACD Signal -> Sell Signal
+                if current_rsi < 35.0 and macd_line is not None and macd_signal is not None and macd_line > macd_signal:
                     self.signals[symbol] = "BUY"
-                elif current_rsi > 65.0:
+                elif current_rsi > 65.0 and macd_line is not None and macd_signal is not None and macd_line < macd_signal:
                     self.signals[symbol] = "SELL"
                 else:
                     self.signals[symbol] = "NEUTRAL"

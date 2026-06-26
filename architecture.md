@@ -117,8 +117,15 @@ Or trigger from the dashboard: **Backtest Lab** tab → select symbol/interval/p
 
 *   **Max Daily Loss:** Realized P&L is checked at the database level. If losses exceed `MAX_DAILY_LOSS` (e.g. Rs. 2,000), the app suspends all operations.
 *   **Max Capital Per Trade:** The value of a single trade (LTP * Quantity) cannot exceed `MAX_CAPITAL_PER_TRADE`.
+*   **Starting Capital:** The system tracks an initial `STARTING_CAPITAL` (e.g. Rs. 50,000). To ensure there is sufficient available balance to execute trades, `STARTING_CAPITAL` must be **at least 2x the price of the most expensive stock in the watchlist** (e.g., TCS ~Rs. 3300).
 *   **TOTP Automation:** Headlessly handles mornings via `pyotp` (free, secure authentication).
 *   **5-Minute Cooldown:** Prevents repeated orders on the same symbol within 300 seconds.
+
+**Railway Environment Variables Requirements:**
+When deploying to Railway (or any cloud environment), configure the following environment variables (these define the values described above):
+- `STARTING_CAPITAL=50000`
+- `MAX_CAPITAL_PER_TRADE=10000`
+- `MAX_DAILY_LOSS=2000`
 
 ---
 

@@ -100,7 +100,7 @@ async def automated_execution_loop(feed: MarketFeed, technicals: TechnicalEngine
                 
             # Match Signal with Gate
             if signal in ["BUY", "SELL"]:
-                if last_trade.get(upstox_symbol, 0) > asyncio.get_event_loop().time() - 300: # 5 mins cooldown
+                if last_trade.get(upstox_symbol, 0) > asyncio.get_running_loop().time() - 300: # 5 mins cooldown
                     continue
                 
                 # Get current price to calculate dynamic quantity
@@ -119,12 +119,12 @@ async def automated_execution_loop(feed: MarketFeed, technicals: TechnicalEngine
                     continue
                 
                 if signal == "BUY" and gate in ["ALLOW_BUY", "ALLOW_ALL"]:
-                    last_trade[upstox_symbol] = asyncio.get_event_loop().time()
+                    last_trade[upstox_symbol] = asyncio.get_running_loop().time()
                     print(f"[EXECUTION] Automated BUY triggered for {upstox_symbol} (Signal: {signal}, Gate: {gate}, Qty: {qty})")
                     await place_order(upstox_symbol, qty, "BUY", state["access_token"])
                     
                 elif signal == "SELL" and gate in ["ALLOW_SELL", "ALLOW_ALL"]:
-                    last_trade[upstox_symbol] = asyncio.get_event_loop().time()
+                    last_trade[upstox_symbol] = asyncio.get_running_loop().time()
                     print(f"[EXECUTION] Automated SELL triggered for {upstox_symbol} (Signal: {signal}, Gate: {gate}, Qty: {qty})")
                     await place_order(upstox_symbol, qty, "SELL", state["access_token"])
 async def shutdown_scheduler():
