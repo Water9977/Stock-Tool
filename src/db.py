@@ -11,6 +11,9 @@ def init_db():
     conn = get_connection()
     cursor = conn.cursor()
     
+    # Enable WAL mode for concurrent reader/writer access
+    cursor.execute("PRAGMA journal_mode=WAL;")
+    
     # 1. Create orders table for logging virtual and live trades
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS orders (
@@ -54,25 +57,37 @@ def start_day_stats(starting_capital: float = 2000.0):
     finally:
         conn.close()
 
-def get_realized_pnl() -> float:
+def get_realized_pnl(cursor=None) -> float:
     """Returns today's realized profit or loss."""
     today_str = date.today().isoformat()
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
+    if cursor is not None:
         cursor.execute("SELECT realized_pnl FROM daily_stats WHERE date = ?", (today_str,))
         row = cursor.fetchone()
+        return row[0] if row else 0.0
+        
+    conn = get_connection()
+    cursor_loc = conn.cursor()
+    try:
+        cursor_loc.execute("SELECT realized_pnl FROM daily_stats WHERE date = ?", (today_str,))
+        row = cursor_loc.fetchone()
         return row[0] if row else 0.0
     finally:
         conn.close()
 
-def update_realized_pnl(amount: float):
+def update_realized_pnl(amount: float, cursor=None):
     """Adds to today's realized profit or loss."""
     today_str = date.today().isoformat()
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
+    if cursor is not None:
         cursor.execute(
+            "UPDATE daily_stats SET realized_pnl = realized_pnl + ? WHERE date = ?",
+            (amount, today_str)
+        )
+        return
+        
+    conn = get_connection()
+    cursor_loc = conn.cursor()
+    try:
+        cursor_loc.execute(
             "UPDATE daily_stats SET realized_pnl = realized_pnl + ? WHERE date = ?",
             (amount, today_str)
         )

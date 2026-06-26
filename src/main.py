@@ -1,4 +1,6 @@
 import asyncio
+import pytz
+from datetime import datetime, time
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -28,6 +30,25 @@ class OrderRequest(BaseModel):
     target_pct: float = Field(default=0.02, description="Target Profit Percentage (e.g. 0.02 for 2%)")
     sl_pct: float = Field(default=0.01, description="Stop Loss Percentage (e.g. 0.01 for 1%)")
 
+def is_market_hours() -> bool:
+    """
+    Returns True if current Indian Standard Time (IST) is between 09:15 and 15:20 on weekdays.
+    If running in VIRTUAL mode, we allow 24/7 simulation for testing purposes.
+    """
+    if Config.TRADING_MODE == "VIRTUAL":
+        return True
+        
+    ist = pytz.timezone("Asia/Kolkata")
+    now = datetime.now(ist)
+    
+    # Check if weekend (5 = Saturday, 6 = Sunday)
+    if now.weekday() >= 5:
+        return False
+        
+    market_start = time(9, 15)
+    market_end = time(15, 20)
+    return market_start <= now.time() <= market_end
+
 async def automated_execution_loop(feed: MarketFeed, technicals: TechnicalEngine, brain: BrainEngine):
     """The core decision engine connecting Hot, Warm, and Cold paths."""
     print("Starting Automated Execution Loop...")
@@ -50,6 +71,10 @@ async def automated_execution_loop(feed: MarketFeed, technicals: TechnicalEngine
         
         # Only trade if system is allowed
         if not state["trading_allowed"]:
+            continue
+            
+        # Check Indian Standard Time (IST) market hours guard
+        if not is_market_hours():
             continue
             
         for yf_symbol in brain.watch_symbols:
@@ -103,11 +128,27 @@ async def automated_execution_loop(feed: MarketFeed, technicals: TechnicalEngine
                     print(f"[EXECUTION] Automated SELL triggered for {upstox_symbol} (Signal: {signal}, Gate: {gate}, Qty: {qty})")
                     await place_order(upstox_symbol, qty, "SELL", state["access_token"])
 async def shutdown_scheduler():
-    """Timer task that automatically flattens all positions and suspends trading after 5 hours."""
-    print("[SYSTEM] 5-hour operational timer started.")
-    await asyncio.sleep(5 * 3600)  # Sleep for 5 hours (18,000 seconds)
-    print("[SYSTEM] 5 hours elapsed. Initiating automated position flattening and suspension...")
-    
+    """
+    Monitors the operational time. 
+    In VIRTUAL mode: Automatically flattens positions and suspends trading after 5 hours.
+    In PAPER / LIVE mode: Flattens positions and suspends trading at 15:25 IST (market close).
+    """
+    if Config.TRADING_MODE == "VIRTUAL":
+        print("[SYSTEM] 5-hour virtual operational timer started.")
+        await asyncio.sleep(5 * 3600)  # Sleep for 5 hours (18,000 seconds)
+        print("[SYSTEM] 5 hours elapsed. Initiating automated position flattening and suspension...")
+    else:
+        ist = pytz.timezone("Asia/Kolkata")
+        print("[SYSTEM] Market-close auto-flatten scheduler started (active for 15:25 IST on weekdays).")
+        while True:
+            await asyncio.sleep(10.0)  # Check every 10 seconds
+            now = datetime.now(ist)
+            
+            # Check if weekday and time is at or past 15:25 IST
+            if now.weekday() < 5 and now.time() >= time(15, 25):
+                print(f"[SYSTEM] Current time {now.strftime('%H:%M:%S')} is at or past 15:25 IST. Initiating end-of-day flatten...")
+                break
+                
     # 1. Suspend trading so no new orders are placed
     state["trading_allowed"] = False
     

@@ -20,6 +20,7 @@ class BrainEngine:
         ]
         self.gates = {s.replace(".NS", ""): "VETO" for s in self.watch_symbols}
         self.global_headlines = []
+        self.headline_cache = {}  # Local cache to prevent redundant Gemini API calls
         
         # Initialize Gemini Client
         api_key = os.getenv("GEMINI_API_KEY")
@@ -32,20 +33,30 @@ class BrainEngine:
     async def run(self):
         """
         The COLD PATH (1-15s)
-        Runs asynchronously every 30 seconds to fetch news and query Gemini.
+        Runs asynchronously every 300 seconds (5 minutes) to fetch news and query Gemini.
+        Uses a local cache to skip Gemini calls if headlines have not changed.
         """
         print("Starting Cold Path AI Sentiment Engine...")
         if not self.client:
+            # If AI is disabled, default gates to ALLOW_ALL so trading can proceed
+            self.gates = {s.replace(".NS", ""): "ALLOW_ALL" for s in self.watch_symbols}
             return
             
         while True:
             for yf_symbol in self.watch_symbols:
+                base_symbol = yf_symbol.replace(".NS", "")
                 try:
                     # 1. Fetch live news headlines from yfinance
                     # Run the sync yfinance block in an executor thread to avoid blocking asyncio
                     headlines = await asyncio.to_thread(self._fetch_news, yf_symbol)
                     
                     if headlines:
+                        headlines_str = "|".join(headlines)
+                        # Check cache to avoid redundant API requests
+                        if self.headline_cache.get(yf_symbol) == headlines_str:
+                            print(f"[COLD PATH] {yf_symbol} news unchanged. Skipping Gemini call. Current gate: {self.gates.get(base_symbol)}")
+                            continue
+                            
                         # 2. Query Gemini 3.1 Flash-Lite
                         prompt = f"""You are an intraday risk management AI. Analyze the following news for {yf_symbol}.
 
@@ -72,18 +83,24 @@ STOCK-SPECIFIC HEADLINES for {yf_symbol}:
                         )
                         
                         decision: SentimentDecision = response.parsed
-                        base_symbol = yf_symbol.replace(".NS", "")
                         
-                        # Strip NSE_EQ| prefix format for matching if needed in future
+                        # Update cache and gate
+                        self.headline_cache[yf_symbol] = headlines_str
                         for k in list(self.gates.keys()):
                             if base_symbol in k:
                                 self.gates[k] = decision.action_gate
                         
                         print(f"[COLD PATH] {yf_symbol} -> Gate: {decision.action_gate} | Score: {decision.sentiment_score} | Reasoning: {decision.reasoning}")
+                    else:
+                        # No headlines found, default to ALLOW_ALL
+                        for k in list(self.gates.keys()):
+                            if base_symbol in k:
+                                self.gates[k] = "ALLOW_ALL"
+                        print(f"[COLD PATH] {yf_symbol} -> No headlines found. Gate set to ALLOW_ALL.")
                 except Exception as e:
                     print(f"[COLD PATH ERROR] Failed processing {yf_symbol}: {e}")
                     
-            await asyncio.sleep(30.0) # Refresh sentiment every 30 seconds
+            await asyncio.sleep(300.0) # Refresh sentiment every 5 minutes (300 seconds)
 
     def _fetch_news(self, ticker: str):
         stock = yf.Ticker(ticker)

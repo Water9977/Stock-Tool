@@ -172,7 +172,7 @@ async def place_order(symbol: str, quantity: int, transaction_type: str, access_
             }
             
         import httpx
-        url = "https://api.upstox.com/v3/order/place"
+        url = "https://api-hft.upstox.com/v3/order/place"
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
@@ -193,7 +193,8 @@ async def place_order(symbol: str, quantity: int, transaction_type: str, access_
             "disclosed_quantity": 0,
             "trigger_price": 0.0,
             "is_amo": False,
-            "slice": False
+            "slice": False,
+            "market_protection": -1  # CRITICAL: -1 is auto protection to avoid UDAPI1158 rejections
         }
         
         async with httpx.AsyncClient() as client:
@@ -292,8 +293,8 @@ async def monitor_virtual_positions():
                         "UPDATE orders SET status = 'VIRTUAL_CLOSED', price = ? WHERE id = ?",
                         (executed_exit_price, order_id)
                     )
-                    update_realized_pnl(trade_pnl)
-                    print(f"[{trigger_reason}] Closed trade {order_id} for {symbol}. Entry: Rs.{entry_price}, Exit (slipped): Rs.{executed_exit_price}. Gross P&L: Rs.{(trade_pnl+charges):+.2f}, Charges: Rs.{charges:.2f}, Net P&L: Rs.{trade_pnl:+.2f}. Total realized today: Rs.{get_realized_pnl():+.2f}")
+                    update_realized_pnl(trade_pnl, cursor=cursor)
+                    print(f"[{trigger_reason}] Closed trade {order_id} for {symbol}. Entry: Rs.{entry_price}, Exit (slipped): Rs.{executed_exit_price}. Gross P&L: Rs.{(trade_pnl+charges):+.2f}, Charges: Rs.{charges:.2f}, Net P&L: Rs.{trade_pnl:+.2f}. Total realized today: Rs.{get_realized_pnl(cursor=cursor):+.2f}")
                 conn.commit()
             except Exception as e:
                 print(f"Error updating DB for closed positions: {e}")
@@ -350,7 +351,7 @@ async def flatten_positions_for_symbol(symbol: str, access_token: str):
                     "UPDATE orders SET status = 'VIRTUAL_CLOSED', price = ? WHERE id = ?",
                     (executed_exit_price, order_id)
                 )
-                update_realized_pnl(pnl)
+                update_realized_pnl(pnl, cursor=cursor)
                 print(f"[FLATTEN] Emergency closed VIRTUAL position {order_id} for {symbol} at Rs.{executed_exit_price}. Gross P&L: Rs.{(pnl+charges):+.2f}, Charges: Rs.{charges:.2f}, Net P&L: Rs.{pnl:+.2f}")
             conn.commit()
         except Exception as e:
