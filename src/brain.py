@@ -6,6 +6,8 @@ from google import genai
 import aiohttp
 import feedparser
 import json
+import pandas as pd
+from datetime import datetime, timezone
 
 class GeminiRateLimiter:
     """
@@ -215,12 +217,71 @@ class MacroAnalyst:
             
         return {'mood': 'NEUTRAL', 'score': 0.0, 'key_themes': []}
 
+class EarningsAgent:
+    def __init__(self):
+        pass
+        
+    def run(self, watch_symbols):
+        print("[EarningsAgent] Scanning for PEAD signals and earnings risk...")
+        earnings_data = {}
+        now = datetime.now(timezone.utc)
+        
+        for sym in watch_symbols:
+            try:
+                t = yf.Ticker(sym)
+                df = t.earnings_dates
+                pead_status = "NEUTRAL"
+                
+                if df is not None and not df.empty:
+                    for dt, row in df.iterrows():
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                            
+                        delta_days = (dt - now).total_seconds() / 86400.0
+                        
+                        if 0 <= delta_days <= 3:
+                            pead_status = "EARNINGS_RISK"
+                            break
+                        elif -7 <= delta_days < 0:
+                            surprise = row.get("Surprise(%)", 0)
+                            if pd.notna(surprise):
+                                if surprise > 0:
+                                    pead_status = "PEAD_BULLISH"
+                                elif surprise < 0:
+                                    pead_status = "PEAD_BEARISH"
+                            break
+                            
+                earnings_data[sym] = pead_status
+            except Exception as e:
+                print(f"    [!] Error fetching earnings for {sym}: {e}")
+                earnings_data[sym] = "NEUTRAL"
+                
+        return earnings_data
+
+class FraudAgent:
+    def __init__(self):
+        self.red_flags = ["fraud", "sebi", "scam", "investigation", "auditor resign", "default", "penalty"]
+
+    def run(self, news_data):
+        print("[FraudAgent] Scanning news for governance red flags...")
+        fraud_flags = {}
+        for sym, headlines in news_data.items():
+            fraud_detected = False
+            for hl in headlines:
+                text = hl.lower()
+                if any(flag in text for flag in self.red_flags):
+                    print(f"    [!] FRAUD FLAG DETECTED for {sym}: '{hl}'")
+                    fraud_detected = True
+                    break
+            fraud_flags[sym] = fraud_detected
+        return fraud_flags
+
 class RiskGatekeeper:
     def __init__(self, client, rate_limiter):
         self.client = client
         self.rate_limiter = rate_limiter
 
-    async def run(self, sentiment_data, macro_data, technical_data, financial_data):
+    async def run(self, sentiment_data, macro_data, technical_data, financial_data, pead_data, fraud_data):
         print("[RiskGatekeeper] Evaluating gates via AI...")
         schema = {
             'type': 'OBJECT',
@@ -250,7 +311,9 @@ class RiskGatekeeper:
         prompt += f"MACRO MOOD: {macro_mood}\n\n"
         
         prompt += "Guidelines:\n"
-        prompt += "- If sentiment is extremely negative or a crash is imminent, output FLATTEN.\n"
+        prompt += "- If sentiment is extremely negative, a crash is imminent, or FRAUD is detected, output FLATTEN.\n"
+        prompt += "- If EARNINGS_RISK is present (upcoming earnings), output VETO to avoid volatility.\n"
+        prompt += "- If PEAD_BULLISH is present (recent earnings beat), assign a higher conviction to ALLOW_BUY.\n"
         prompt += "- If available cash is very low and sentiment is weak, output VETO to preserve capital.\n"
         prompt += "- Consider the last 10 RSI and MACD values for trend direction.\n\n"
         
@@ -259,8 +322,13 @@ class RiskGatekeeper:
             sentiment_score = data.get('score', 0.0)
             tech = technical_data.get(sym, {})
             
+            pead_status = pead_data.get(sym, "NEUTRAL")
+            fraud_detected = fraud_data.get(sym, False)
+            
             prompt += f"TICKER: {base_symbol}\n"
             prompt += f"SENTIMENT SCORE: {sentiment_score}\n"
+            prompt += f"PEAD STATUS: {pead_status}\n"
+            prompt += f"FRAUD DETECTED: {fraud_detected}\n"
             prompt += f"RSI (Last 10): {tech.get('RSI', [])}\n"
             prompt += f"MACD (Last 10): {tech.get('MACD', [])}\n\n"
             
@@ -294,6 +362,8 @@ class BrainEngine:
             self.news_agent = None
             self.sentiment_analyst = None
             self.macro_analyst = None
+            self.earnings_agent = None
+            self.fraud_agent = None
             self.risk_gatekeeper = None
         else:
             self.client = genai.Client(api_key=api_key)
@@ -301,6 +371,8 @@ class BrainEngine:
             self.news_agent = NewsAgent(self.client, self.rate_limiter)
             self.sentiment_analyst = SentimentAnalyst(self.client, self.rate_limiter)
             self.macro_analyst = MacroAnalyst(self.client, self.rate_limiter)
+            self.earnings_agent = EarningsAgent()
+            self.fraud_agent = FraudAgent()
             self.risk_gatekeeper = RiskGatekeeper(self.client, self.rate_limiter)
 
     async def run(self, technicals):
@@ -326,6 +398,9 @@ class BrainEngine:
                 self.macro_analyst.run(self.global_headlines)
             )
             
+            pead_data = await asyncio.to_thread(self.earnings_agent.run, self.watch_symbols)
+            fraud_data = self.fraud_agent.run(news_data)
+            
             # Extract Technical Data
             tech_data = {}
             for sym in self.watch_symbols:
@@ -342,7 +417,7 @@ class BrainEngine:
                 "open_positions": list(_open_positions.values())
             }
             
-            new_gates = await self.risk_gatekeeper.run(sentiment, macro, tech_data, fin_data)
+            new_gates = await self.risk_gatekeeper.run(sentiment, macro, tech_data, fin_data, pead_data, fraud_data)
             
             # Update instance state safely
             for base_sym, gate in new_gates.items():
