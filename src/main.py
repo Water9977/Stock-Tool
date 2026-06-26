@@ -86,7 +86,7 @@ async def automated_execution_loop(feed: MarketFeed, technicals: TechnicalEngine
                 continue
                 
             # 1. Check AI Gate (Cold Path)
-            gate = brain.get_gate_status(base_symbol)
+            gate = brain.gates.get(base_symbol, "VETO")
             
             # If the AI gate triggers FLATTEN, immediately exit all positions for this symbol
             if gate == "FLATTEN":
