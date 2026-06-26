@@ -9,7 +9,7 @@ from src.config import Config
 from src.db import init_db, start_day_stats, reset_simulation, get_connection, get_realized_pnl
 from src.auth import authenticate_upstox
 from src.market_feed import MarketFeed
-from src.orders import place_order, monitor_virtual_positions, sync_open_positions, flatten_positions_for_symbol
+from src.orders import place_order, monitor_virtual_positions, sync_open_positions, flatten_positions_for_symbol, clear_open_positions
 from src.technicals import TechnicalEngine
 from src.brain import BrainEngine
 
@@ -283,6 +283,15 @@ async def get_latest_prices():
     """Retrieves current in-memory stock quotes."""
     feed = MarketFeed()
     return feed.price_cache
+
+
+@app.post("/admin/reset-simulation")
+async def reset_simulation_endpoint():
+    """Wipes all virtual trades and resets simulation."""
+    reset_simulation()
+    clear_open_positions()
+    start_day_stats(Config.STARTING_CAPITAL)
+    return {"status": "reset", "starting_capital": Config.STARTING_CAPITAL}
 
 
 class BacktestRequest(BaseModel):

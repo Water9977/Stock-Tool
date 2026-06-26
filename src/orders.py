@@ -8,6 +8,11 @@ from src.market_feed import MarketFeed
 # In-memory Hot Path cache for open virtual positions
 _open_positions = {}
 
+def clear_open_positions():
+    """Clears the Hot Path cache of open virtual positions."""
+    global _open_positions
+    _open_positions.clear()
+
 def sync_open_positions():
     """Initializes the Hot Path cache from SQLite on startup."""
     global _open_positions
