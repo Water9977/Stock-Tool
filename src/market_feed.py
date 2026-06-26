@@ -78,6 +78,7 @@ class MarketFeed:
             cls._instance.is_running = False
             cls._instance.tick_queues = []
             cls._instance._access_token = None
+            cls._instance.last_tick_time = None
         return cls._instance
 
     def set_access_token(self, token: str):
@@ -211,6 +212,16 @@ class MarketFeed:
             print(f"[FEED] Protobuf decode error: {e}")
         return ticks
 
+    async def _stale_feed_watchdog(self, ws):
+        """Monitors for stale ticks (no activity > 30s) and triggers a force reconnection."""
+        while self.is_running and ws.open:
+            await asyncio.sleep(5)
+            now = asyncio.get_running_loop().time()
+            if self.last_tick_time and now - self.last_tick_time > 30:
+                print("[FEED] WATCHDOG: Stale feed detected (>30s without ticks). Forcing reconnect...")
+                await ws.close()
+                break
+
     async def _run_live_feed(self):
         """
         Connects to the real Upstox V3 WebSocket market data feed.
@@ -250,29 +261,37 @@ class MarketFeed:
                     print(f"[FEED] Subscribed to {len(INSTRUMENT_KEYS)} instruments.")
                     retry_delay = 5   # reset on successful connect
 
-                    async for message in ws:
-                        if not self.is_running:
-                            break
+                    self.last_tick_time = asyncio.get_running_loop().time()
+                    watchdog_task = asyncio.create_task(self._stale_feed_watchdog(ws))
 
-                        # All frames from Upstox V3 are binary Protobuf
-                        if isinstance(message, bytes):
-                            ticks = self._decode_protobuf_tick(message, pb2)
-                            for tick in ticks:
-                                symbol = tick["symbol"]
-                                price = tick["price"]
-                                # Update LTP cache (Hot Path)
-                                self.price_cache[symbol] = price
-                                # Broadcast to Warm Path indicator queues
-                                await self._broadcast_tick(symbol, price)
+                    try:
+                        async for message in ws:
+                            if not self.is_running:
+                                break
 
-                        elif isinstance(message, str):
-                            # Upstox sometimes sends a JSON heartbeat/status message
-                            try:
-                                payload = json.loads(message)
-                                if payload.get("type") == "error":
-                                    print(f"[FEED] Server error: {payload}")
-                            except json.JSONDecodeError:
-                                pass
+                            self.last_tick_time = asyncio.get_running_loop().time()
+
+                            # All frames from Upstox V3 are binary Protobuf
+                            if isinstance(message, bytes):
+                                ticks = self._decode_protobuf_tick(message, pb2)
+                                for tick in ticks:
+                                    symbol = tick["symbol"]
+                                    price = tick["price"]
+                                    # Update LTP cache (Hot Path)
+                                    self.price_cache[symbol] = price
+                                    # Broadcast to Warm Path indicator queues
+                                    await self._broadcast_tick(symbol, price)
+
+                            elif isinstance(message, str):
+                                # Upstox sometimes sends a JSON heartbeat/status message
+                                try:
+                                    payload = json.loads(message)
+                                    if payload.get("type") == "error":
+                                        print(f"[FEED] Server error: {payload}")
+                                except json.JSONDecodeError:
+                                    pass
+                    finally:
+                        watchdog_task.cancel()
 
             except websockets.exceptions.ConnectionClosedOK:
                 print("[FEED] WebSocket closed normally. Reconnecting...")
