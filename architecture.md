@@ -20,7 +20,7 @@ Since LLMs are constrained by inference speeds (1–3 seconds minimum), they can
 +--------------------------------------------------------------------------------+
 |                                   WARM PATH                                    |
 |   [Tick Queue] ---> [talipp Indicator Engine] ---> [Baseline Buy/Sell Signals] |
-|   Latency: 10-100ms | Calculations: RSI, MACD, EMAs                            |
+|   Latency: 10-100ms | Calculations: RSI, MACD                                  |
 +--------------------------------------------------------------------------------+
                                        |
                      (Approved Trade Gate Check + Conviction)
@@ -45,7 +45,7 @@ Since LLMs are constrained by inference speeds (1–3 seconds minimum), they can
 ### 🟨 WARM PATH (Technical Calculations)
 *   **Latency Budget:** 10–100ms.
 *   **Role:** Processes ticks to update technical indicators and generate signals.
-*   **Engine:** Uses the `talipp` library for incremental computations, updating indicators like RSI (Relative Strength Index) and MACD (Moving Average Convergence Divergence) on each candle close.
+*   **Engine:** Uses the `talipp` library for incremental computations, updating indicators like RSI (Relative Strength Index) and MACD (Moving Average Convergence Divergence) on each incoming price tick.
 *   **Shedding:** If tick queues fill during high volatility, a shedding mechanism drops intermediate ticks to keep indicators current.
 
 ### 🟦 COLD PATH (The AI Sentiment Gate & Safety Guardrails)
