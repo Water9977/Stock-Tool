@@ -6,10 +6,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from src.config import Config
-from src.db import init_db, start_day_stats, reset_simulation, get_connection, get_realized_pnl
+from src.db import init_db, start_day_stats, start_day_stats_async, reset_simulation, get_connection, get_realized_pnl_async
 from src.auth import authenticate_upstox
 from src.market_feed import MarketFeed
-from src.orders import place_order, monitor_virtual_positions, sync_open_positions, flatten_positions_for_symbol, clear_open_positions
+from src.orders import place_order, monitor_open_positions, sync_open_positions, flatten_positions_for_symbol, clear_open_positions
 from src.technicals import TechnicalEngine
 from src.brain import BrainEngine
 
@@ -175,7 +175,7 @@ async def startup_event():
         print("[SYSTEM] RESET_ON_START=true: clean slate started.")
 
     # 3. Setup today's starting stats (loaded from config)
-    start_day_stats(Config.STARTING_CAPITAL)
+    await start_day_stats_async(Config.STARTING_CAPITAL)
     
     # 3. Retrieve daily access token (programmatic login)
     try:
@@ -201,8 +201,7 @@ async def startup_event():
     state["brain"] = brain
     
     # 7. Start background loops
-    if Config.TRADING_MODE in ["VIRTUAL", "PAPER"]:
-        asyncio.create_task(monitor_virtual_positions())
+    asyncio.create_task(monitor_open_positions(state.get("access_token")))
         
     asyncio.create_task(automated_execution_loop(feed, technicals, brain))
     
@@ -225,10 +224,12 @@ async def status_api():
     brain = state.get("brain")
     technicals = state.get("technicals")
     
+    today_pnl = await get_realized_pnl_async()
+    
     return {
         "status": "active" if state["trading_allowed"] else "suspended",
         "trading_mode": Config.TRADING_MODE,
-        "today_realized_pnl": get_realized_pnl(),
+        "today_realized_pnl": today_pnl,
         "max_allowed_loss": Config.MAX_DAILY_LOSS,
         "max_capital_per_trade": Config.MAX_CAPITAL_PER_TRADE,
         "gates": brain.gates if brain else {},
@@ -256,17 +257,15 @@ async def execute_order(request: OrderRequest):
         
     return res
 
-@app.get("/portfolio")
-async def get_portfolio():
-    """Lists current open mock positions and closed trade history."""
+def _get_portfolio_sync():
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT * FROM orders WHERE status = 'VIRTUAL_OPEN'")
+        cursor.execute("SELECT * FROM orders WHERE status IN ('VIRTUAL_OPEN', 'LIVE_SUBMITTED')")
         columns = [column[0] for column in cursor.description]
         open_positions = [dict(zip(columns, row)) for row in cursor.fetchall()]
         
-        cursor.execute("SELECT * FROM orders WHERE status != 'VIRTUAL_OPEN' ORDER BY timestamp DESC LIMIT 20")
+        cursor.execute("SELECT * FROM orders WHERE status NOT IN ('VIRTUAL_OPEN', 'LIVE_SUBMITTED') ORDER BY timestamp DESC LIMIT 20")
         columns_hist = [column[0] for column in cursor.description]
         history = [dict(zip(columns_hist, row)) for row in cursor.fetchall()]
         
@@ -276,6 +275,11 @@ async def get_portfolio():
         }
     finally:
         conn.close()
+
+@app.get("/portfolio")
+async def get_portfolio():
+    """Lists current open mock positions and closed trade history."""
+    return await asyncio.to_thread(_get_portfolio_sync)
 
 
 @app.get("/prices")
@@ -288,9 +292,9 @@ async def get_latest_prices():
 @app.post("/admin/reset-simulation")
 async def reset_simulation_endpoint():
     """Wipes all virtual trades and resets simulation."""
-    reset_simulation()
+    await asyncio.to_thread(reset_simulation)
     clear_open_positions()
-    start_day_stats(Config.STARTING_CAPITAL)
+    await start_day_stats_async(Config.STARTING_CAPITAL)
     return {"status": "reset", "starting_capital": Config.STARTING_CAPITAL}
 
 

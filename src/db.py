@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import asyncio
 from datetime import date
 
 DATABASE_FILE = os.getenv("DATABASE_PATH", "trading.db")
@@ -7,14 +8,10 @@ DATABASE_FILE = os.getenv("DATABASE_PATH", "trading.db")
 def get_connection():
     return sqlite3.connect(DATABASE_FILE, timeout=10)
 
-def init_db():
+def _init_db_sync():
     conn = get_connection()
     cursor = conn.cursor()
-    
-    # Enable WAL mode for concurrent reader/writer access
     cursor.execute("PRAGMA journal_mode=WAL;")
-    
-    # 1. Create orders table for logging virtual and live trades
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             id TEXT PRIMARY KEY,
@@ -29,8 +26,6 @@ def init_db():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    
-    # 2. Create daily stats table for enforcing maximum daily loss rules
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS daily_stats (
             date TEXT PRIMARY KEY,
@@ -38,27 +33,34 @@ def init_db():
             realized_pnl REAL DEFAULT 0.0
         )
     """)
-    
     conn.commit()
     conn.close()
+
+def init_db():
+    _init_db_sync()
     print("Database tables initialized successfully.")
 
-def start_day_stats(starting_capital: float = 2000.0):
-    """Initializes daily stats for today if not already present."""
+def _start_day_stats_sync(starting_capital: float):
     today_str = date.today().isoformat()
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute(
-            "INSERT OR IGNORE INTO daily_stats (date, starting_capital) VALUES (?, ?)",
-            (today_str, starting_capital)
-        )
+        cursor.execute("""
+            INSERT INTO daily_stats (date, starting_capital) 
+            VALUES (?, ?)
+            ON CONFLICT(date) DO UPDATE SET starting_capital = excluded.starting_capital
+        """, (today_str, starting_capital))
         conn.commit()
     finally:
         conn.close()
 
+def start_day_stats(starting_capital: float = 2000.0):
+    _start_day_stats_sync(starting_capital)
+
+async def start_day_stats_async(starting_capital: float = 2000.0):
+    await asyncio.to_thread(_start_day_stats_sync, starting_capital)
+
 def get_realized_pnl(cursor=None) -> float:
-    """Returns today's realized profit or loss."""
     today_str = date.today().isoformat()
     if cursor is not None:
         cursor.execute("SELECT realized_pnl FROM daily_stats WHERE date = ?", (today_str,))
@@ -74,8 +76,10 @@ def get_realized_pnl(cursor=None) -> float:
     finally:
         conn.close()
 
+async def get_realized_pnl_async() -> float:
+    return await asyncio.to_thread(get_realized_pnl)
+
 def update_realized_pnl(amount: float, cursor=None):
-    """Adds to today's realized profit or loss."""
     today_str = date.today().isoformat()
     if cursor is not None:
         cursor.execute(
@@ -96,7 +100,6 @@ def update_realized_pnl(amount: float, cursor=None):
         conn.close()
 
 def get_starting_capital() -> float:
-    """Returns today's starting capital."""
     today_str = date.today().isoformat()
     conn = get_connection()
     cursor = conn.cursor()
@@ -107,8 +110,7 @@ def get_starting_capital() -> float:
     finally:
         conn.close()
 
-def reset_simulation():
-    """Wipes all trade history and daily stats for a clean simulation start."""
+def _reset_simulation_sync():
     conn = get_connection()
     cursor = conn.cursor()
     try:
@@ -118,3 +120,10 @@ def reset_simulation():
         print("[DB] Simulation reset: all orders and daily stats wiped.")
     finally:
         conn.close()
+
+def reset_simulation():
+    _reset_simulation_sync()
+
+async def execute_in_db(func, *args):
+    """Utility to run a synchronous DB function containing its own connection lifecycle in a separate thread."""
+    return await asyncio.to_thread(func, *args)

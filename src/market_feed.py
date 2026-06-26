@@ -79,6 +79,7 @@ class MarketFeed:
             cls._instance.tick_queues = []
             cls._instance._access_token = None
             cls._instance.last_tick_time = None
+            cls._instance.candles = {}  # symbol -> {period, open, high, low, close}
         return cls._instance
 
     def set_access_token(self, token: str):
@@ -91,6 +92,28 @@ class MarketFeed:
         self.tick_queues.append(q)
         return q
 
+    async def _process_tick(self, symbol: str, price: float):
+        """Aggregates 1-second ticks into 5-minute OHLC candles and broadcasts the closed candle."""
+        self.price_cache[symbol] = price
+        
+        import time
+        current_period = int(time.time() // 300)  # 5-minute periods
+        
+        if symbol not in self.candles:
+            self.candles[symbol] = {'period': current_period, 'open': price, 'high': price, 'low': price, 'close': price}
+        else:
+            candle = self.candles[symbol]
+            if current_period > candle['period']:
+                # Candle closed, broadcast the close price
+                await self._broadcast_tick(symbol, candle['close'])
+                # Start new candle
+                self.candles[symbol] = {'period': current_period, 'open': price, 'high': price, 'low': price, 'close': price}
+            else:
+                # Update current candle
+                candle['high'] = max(candle['high'], price)
+                candle['low'] = min(candle['low'], price)
+                candle['close'] = price
+
     async def _broadcast_tick(self, symbol: str, price: float):
         """Sends a tick to all subscribers. Drops tick silently if a subscriber queue is full."""
         tick = {"symbol": symbol, "price": price}
@@ -98,7 +121,7 @@ class MarketFeed:
             try:
                 q.put_nowait(tick)
             except asyncio.QueueFull:
-                pass   # Tick shedding — never block the feed
+                pass   # Tick shedding – never block the feed
 
     async def start(self):
         """Starts the price feed background worker."""
@@ -124,8 +147,8 @@ class MarketFeed:
                 # Small percentage change: -0.08% to +0.08% per second
                 pct_change = random.gauss(0.0, 0.0004)
                 new_price = round(old_price * (1 + pct_change), 2)
-                self.price_cache[symbol] = new_price
-                await self._broadcast_tick(symbol, new_price)
+                
+                await self._process_tick(symbol, new_price)
 
     # ─────────────────────────────────────────────────────────────────────────
     #  LIVE MODE — Upstox V3 WebSocket + Protobuf
@@ -277,10 +300,8 @@ class MarketFeed:
                                 for tick in ticks:
                                     symbol = tick["symbol"]
                                     price = tick["price"]
-                                    # Update LTP cache (Hot Path)
-                                    self.price_cache[symbol] = price
-                                    # Broadcast to Warm Path indicator queues
-                                    await self._broadcast_tick(symbol, price)
+                                    # Aggregate tick into 5-min candle (Warm Path) and update LTP (Hot Path)
+                                    await self._process_tick(symbol, price)
 
                             elif isinstance(message, str):
                                 # Upstox sometimes sends a JSON heartbeat/status message

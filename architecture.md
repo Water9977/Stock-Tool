@@ -45,8 +45,7 @@ Since LLMs are constrained by inference speeds (1–3 seconds minimum), they can
 ### 🟨 WARM PATH (Technical Calculations)
 *   **Latency Budget:** 10–100ms.
 *   **Role:** Processes ticks to update technical indicators and generate signals.
-*   **Engine:** Uses the `talipp` library for incremental computations, updating indicators like RSI (Relative Strength Index) and MACD (Moving Average Convergence Divergence) on each incoming price tick.
-*   **Shedding:** If tick queues fill during high volatility, a shedding mechanism drops intermediate ticks to keep indicators current.
+*   **Engine:** The `MarketFeed` aggregates incoming 1-second ticks into 5-minute OHLC candles. It emits only the closed 5-minute candle to the Warm Path. Uses the `talipp` library for computations, updating indicators like RSI and MACD on each 5-minute closed candle, significantly reducing noise compared to per-second updates.
 
 ### 🟦 COLD PATH (The AI Sentiment Gate & Safety Guardrails)
 *   **Latency Budget:** 1–15 seconds.
@@ -88,12 +87,13 @@ Under SEBI guidelines, retail algorithmic trading via APIs must incorporate stri
 
 | Module | Status | Description |
 |--------|--------|-------------|
-| `src/market_feed.py` | ✅ Phase 2 | **LIVE:** Upstox V3 WebSocket + Protobuf decode via `upstox_client.feeder.proto.MarketDataFeedV3_pb2`. Exponential back-off reconnection. **VIRTUAL:** Random-walk Gaussian simulator. |
+| `src/market_feed.py` | ✅ Phase 2 | **LIVE:** Upstox V3 WebSocket + Protobuf decode. Aggregates 1-second ticks into 5-minute OHLC candles for the Warm Path, while maintaining sub-second updates in the Hot Path for immediate exit logic. |
 | `src/backtest.py` | ✅ Phase 2 | Downloads real NSE OHLCV data from Yahoo Finance. Feeds tick-by-tick through TechnicalEngine. Reports: Win Rate, P&L, Max Drawdown, trade-by-trade log. Includes realistic slippage (0.05%) and government tax charges. |
 | `src/technicals.py` | ✅ Stable | RSI(14) + MACD(12,26,9) via `talipp`. Signal thresholds: RSI < 35 = BUY, RSI > 65 = SELL. |
-| `src/brain.py` | ✅ Stable | Gemini sentiment gating + Livemint RSS aggregation. Uses headlines hashing cache. |
-| `src/orders.py` | ✅ Stable | VIRTUAL: SQLite (WAL mode, single-transaction cursors). LIVE: Upstox `/v3/order/place` HFT REST API (with `market_protection: -1`). |
-| `src/auth.py` | ✅ Stable | Programmatic TOTP login for daily token refresh. |
+| `src/brain.py` | ⏳ Phase 3 | (Pending migration to `TradingAgentsGraph`) Gemini sentiment gating + Livemint RSS aggregation. |
+| `src/orders.py` | ✅ Stable | VIRTUAL: SQLite (WAL mode). LIVE: Upstox `/v3/order/place` HFT REST API. Implements `RiskEngine` for deterministic Max Daily Loss and Consecutive Loss Circuit Breaker tracking. |
+| `src/auth.py` | ✅ Stable | Manual OAuth startup flow requiring terminal input. (Legacy `pyotp` TOTP automation removed for SEBI compliance.) |
+| `src/db.py` | ✅ Phase 2 | SQLite configured with Write-Ahead Logging (WAL). All queries are safely offloaded to `asyncio.to_thread()` to prevent blocking the async event loop. |
 
 ### Live WebSocket Authorization Flow
 
@@ -123,7 +123,7 @@ Or trigger from the dashboard: **Backtest Lab** tab → select symbol/interval/p
 *   **Max Daily Loss:** Realized P&L is checked at the database level. If losses exceed `MAX_DAILY_LOSS` (e.g. Rs. 2,000), the app suspends all operations.
 *   **Max Capital Per Trade:** The value of a single trade (LTP * Quantity) cannot exceed `MAX_CAPITAL_PER_TRADE`.
 *   **Starting Capital:** The system tracks an initial `STARTING_CAPITAL` (e.g. Rs. 50,000). To ensure there is sufficient available balance to execute trades, `STARTING_CAPITAL` must be **at least 2x the price of the most expensive stock in the watchlist** (e.g., TCS ~Rs. 3300).
-*   **TOTP Automation:** Headlessly handles mornings via `pyotp` (free, secure authentication).
+*   **Authentication (Manual):** Headless TOTP automation was removed for compliance reasons. The app now uses a secure, manual startup flow where the user must provide the daily OAuth `code` via terminal input.
 *   **5-Minute Cooldown:** Prevents repeated orders on the same symbol within 300 seconds.
 
 **Railway Environment Variables Requirements:**
