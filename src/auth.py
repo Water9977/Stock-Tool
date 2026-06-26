@@ -54,7 +54,7 @@ async def authenticate_upstox() -> str:
 
     print("\nExchanging code for access token...")
     async with httpx.AsyncClient() as client:
-        r = await client.post("https://api.upstox.com/v2/oauth/token", data={
+        r = await client.post("https://api.upstox.com/v2/login/authorization/token", data={
             "code": auth_code,
             "client_id": Config.CLIENT_ID,
             "client_secret": Config.CLIENT_SECRET,
