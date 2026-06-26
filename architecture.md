@@ -118,6 +118,14 @@ Or trigger from the dashboard: **Backtest Lab** tab → select symbol/interval/p
 
 ---
 
+## 4. Architectural Enhancements
+
+### 4.1. The AI Brain (Cold Path Upgrade)
+The system has replaced its original 4-agent pipeline (`NewsAgent`, `SentimentAnalyst`, `MacroAnalyst`, `RiskGatekeeper` making 4 separate LLM calls) with a highly optimized, single-shot **CommitteeAgent**.
+1. **Context Aggregation:** Raw Yahoo Finance news, Livemint macro headlines, local PEAD status (via `yfinance`), deterministic fraud flag checking, technical 5-minute OHLC indicators, and active financial state are all gathered.
+2. **Single-Shot Evaluation:** A single request is sent to `gemini-3.1-flash-lite`, enforcing a strict JSON schema output for macro mood, reasoning, and a ticker-specific list of gates (`ALLOW_BUY`, `ALLOW_SELL`, `ALLOW_ALL`, `VETO`, `FLATTEN`) along with a conviction score.
+3. **Quota & Latency Efficiency:** This reduces LLM calls from 4 per 5 minutes to exactly 1 per 5 minutes, significantly decreasing latency while saving massive amounts of API quota.
+
 ## 5. Financial Safety Configurations
 
 *   **Max Daily Loss:** Realized P&L is checked at the database level. If losses exceed `MAX_DAILY_LOSS` (e.g. Rs. 2,000), the app suspends all operations.

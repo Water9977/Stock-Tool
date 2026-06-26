@@ -8,6 +8,7 @@ import feedparser
 import json
 import pandas as pd
 from datetime import datetime, timezone
+import hashlib
 
 class GeminiRateLimiter:
     """
@@ -22,7 +23,6 @@ class GeminiRateLimiter:
     async def acquire(self):
         async with self._lock:
             now = asyncio.get_running_loop().time()
-            # Remove timestamps older than window
             self.call_timestamps = [ts for ts in self.call_timestamps if now - ts < self.window_seconds]
             
             if len(self.call_timestamps) >= self.max_calls:
@@ -69,155 +69,28 @@ async def call_gemini_with_retry(client, rate_limiter, prompt, schema, max_retri
     return None
 
 class NewsAgent:
-    def __init__(self, client, rate_limiter):
-        self.client = client
-        self.rate_limiter = rate_limiter
-        self.cached_combined_news = ""
-        self.cached_output = {}
+    """
+    Fetches raw news headlines from Yahoo Finance without calling LLM.
+    """
+    def __init__(self):
+        self.last_news_hash = ""
 
-    def _fetch_yf_news(self, ticker: str):
-        stock = yf.Ticker(ticker)
-        news_items = stock.news
-        if not news_items:
+    def fetch_yf_news(self, ticker: str):
+        try:
+            stock = yf.Ticker(ticker)
+            news_items = stock.news
+            if not news_items:
+                return []
+            return [item.get('title', '') for item in news_items[:5]]
+        except Exception as e:
+            print(f"[NewsAgent ERROR] Failed fetching news for {ticker}: {e}")
             return []
-        return [item.get('title', '') for item in news_items[:5]]
-
-    async def run(self, watch_symbols, global_headlines):
-        symbol_news = {}
-        for yf_symbol in watch_symbols:
-            try:
-                headlines = await asyncio.to_thread(self._fetch_yf_news, yf_symbol)
-                symbol_news[yf_symbol] = headlines
-            except Exception as e:
-                print(f"[NewsAgent ERROR] Failed fetching news for {yf_symbol}: {e}")
-                symbol_news[yf_symbol] = []
-        
-        combined_news_str = f"GLOBAL:{'|'.join(global_headlines)};"
-        for sym, headlines in symbol_news.items():
-            combined_news_str += f"{sym}:{'|'.join(headlines)};"
-
-        if self.cached_combined_news == combined_news_str and self.cached_output:
-            print("[NewsAgent] News unchanged. Using cached headlines.")
-            return self.cached_output
-
-        print("[NewsAgent] Extracting top headlines via LLM...")
-        schema = {
-            'type': 'OBJECT',
-            'properties': {
-                'symbols': {
-                    'type': 'ARRAY',
-                    'items': {
-                        'type': 'OBJECT',
-                        'properties': {
-                            'ticker': {'type': 'STRING'},
-                            'top_headlines': {
-                                'type': 'ARRAY',
-                                'items': {'type': 'STRING'}
-                            }
-                        },
-                        'required': ['ticker', 'top_headlines']
-                    }
-                }
-            },
-            'required': ['symbols']
-        }
-
-        prompt = "Extract the top 3 most relevant headlines per symbol from the following raw data. Format as requested.\n"
-        prompt += f"GLOBAL MARKET HEADLINES:\n{chr(10).join(global_headlines) if global_headlines else 'None'}\n\n"
-        for sym, h in symbol_news.items():
-            prompt += f"RAW HEADLINES FOR {sym}:\n{chr(10).join(h) if h else 'None'}\n\n"
-
-        result = await call_gemini_with_retry(self.client, self.rate_limiter, prompt, schema)
-        if result and 'symbols' in result:
-            output = {item['ticker']: item['top_headlines'] for item in result['symbols']}
-            # Ensure all requested symbols exist
-            for sym in watch_symbols:
-                if sym not in output:
-                    output[sym] = []
-            self.cached_combined_news = combined_news_str
-            self.cached_output = output
-            return output
-        
-        return {sym: [] for sym in watch_symbols}
-
-class SentimentAnalyst:
-    def __init__(self, client, rate_limiter):
-        self.client = client
-        self.rate_limiter = rate_limiter
-
-    async def run(self, news_data):
-        print("[SentimentAnalyst] Scoring sentiment...")
-        schema = {
-            'type': 'OBJECT',
-            'properties': {
-                'sentiments': {
-                    'type': 'ARRAY',
-                    'items': {
-                        'type': 'OBJECT',
-                        'properties': {
-                            'ticker': {'type': 'STRING'},
-                            'score': {'type': 'NUMBER', 'description': '-1.0 to 1.0'},
-                            'reasoning': {'type': 'STRING'}
-                        },
-                        'required': ['ticker', 'score', 'reasoning']
-                    }
-                }
-            },
-            'required': ['sentiments']
-        }
-        
-        prompt = "Analyze the sentiment for the following tickers based on their top headlines. Score from -1.0 (very negative) to 1.0 (very positive).\n\n"
-        for sym, headlines in news_data.items():
-            prompt += f"TICKER: {sym}\nHEADLINES:\n{chr(10).join(headlines) if headlines else 'No news'}\n\n"
-            
-        result = await call_gemini_with_retry(self.client, self.rate_limiter, prompt, schema)
-        output = {}
-        if result and 'sentiments' in result:
-            for item in result['sentiments']:
-                output[item['ticker']] = {
-                    'score': float(item.get('score', 0.0)),
-                    'reasoning': item.get('reasoning', '')
-                }
-        
-        for sym in news_data.keys():
-            if sym not in output:
-                output[sym] = {'score': 0.0, 'reasoning': 'Failed to fetch sentiment'}
-        return output
-
-class MacroAnalyst:
-    def __init__(self, client, rate_limiter):
-        self.client = client
-        self.rate_limiter = rate_limiter
-
-    async def run(self, global_headlines):
-        print("[MacroAnalyst] Assessing market mood...")
-        schema = {
-            'type': 'OBJECT',
-            'properties': {
-                'mood': {'type': 'STRING', 'description': 'BULLISH, NEUTRAL, or BEARISH'},
-                'score': {'type': 'NUMBER', 'description': '-1.0 to 1.0'},
-                'key_themes': {
-                    'type': 'ARRAY',
-                    'items': {'type': 'STRING'}
-                }
-            },
-            'required': ['mood', 'score', 'key_themes']
-        }
-        
-        prompt = "Assess the overall market mood based on these global headlines. Provide mood, score, and key themes.\n\n"
-        prompt += f"HEADLINES:\n{chr(10).join(global_headlines) if global_headlines else 'None'}\n"
-        
-        result = await call_gemini_with_retry(self.client, self.rate_limiter, prompt, schema)
-        if result:
-            return {
-                'mood': result.get('mood', 'NEUTRAL').upper(),
-                'score': float(result.get('score', 0.0)),
-                'key_themes': result.get('key_themes', [])
-            }
-            
-        return {'mood': 'NEUTRAL', 'score': 0.0, 'key_themes': []}
 
 class EarningsAgent:
+    """
+    Checks YFinance for PEAD (Post-Earnings Announcement Drift) and Earnings Risk.
+    Deterministic, no LLM calls.
+    """
     def __init__(self):
         pass
         
@@ -259,6 +132,9 @@ class EarningsAgent:
         return earnings_data
 
 class FraudAgent:
+    """
+    Deterministic string matching for SEBI/Fraud red flags in news.
+    """
     def __init__(self):
         self.red_flags = ["fraud", "sebi", "scam", "investigation", "auditor resign", "default", "penalty"]
 
@@ -276,16 +152,22 @@ class FraudAgent:
             fraud_flags[sym] = fraud_detected
         return fraud_flags
 
-class RiskGatekeeper:
+class CommitteeAgent:
+    """
+    Single-shot Gemini call that replaces SentimentAnalyst, MacroAnalyst, and RiskGatekeeper.
+    Evaluates everything in one prompt to save API quota and latency.
+    """
     def __init__(self, client, rate_limiter):
         self.client = client
         self.rate_limiter = rate_limiter
 
-    async def run(self, sentiment_data, macro_data, technical_data, financial_data, pead_data, fraud_data):
-        print("[RiskGatekeeper] Evaluating gates via AI...")
+    async def run(self, global_headlines, news_data, pead_data, fraud_data, technical_data, financial_data):
+        print("[CommitteeAgent] Evaluating Sentiment, Macro, and Gates via single AI call...")
         schema = {
             'type': 'OBJECT',
             'properties': {
+                'macro_mood': {'type': 'STRING', 'description': 'BULLISH, NEUTRAL, or BEARISH'},
+                'macro_reasoning': {'type': 'STRING'},
                 'gates': {
                     'type': 'ARRAY',
                     'items': {
@@ -293,54 +175,57 @@ class RiskGatekeeper:
                         'properties': {
                             'ticker': {'type': 'STRING'},
                             'gate': {'type': 'STRING', 'description': 'ALLOW_BUY, ALLOW_SELL, ALLOW_ALL, VETO, or FLATTEN'},
-                            'reasoning': {'type': 'STRING'}
+                            'conviction_score': {'type': 'NUMBER', 'description': '0.0 to 1.0 representing confidence'},
+                            'sentiment': {'type': 'NUMBER', 'description': '-1.0 to 1.0 based on news'},
+                            'reasoning': {'type': 'STRING', 'description': 'Why this gate was chosen based on tech, news, fraud, PEAD.'}
                         },
-                        'required': ['ticker', 'gate', 'reasoning']
+                        'required': ['ticker', 'gate', 'conviction_score', 'sentiment', 'reasoning']
                     }
                 }
             },
-            'required': ['gates']
+            'required': ['macro_mood', 'macro_reasoning', 'gates']
         }
         
-        macro_mood = macro_data.get('mood', 'NEUTRAL')
-        
-        prompt = "You are an expert AI risk gatekeeper for a stock trading system. "
-        prompt += "Your job is to decide the action gate for each symbol. Output JSON as requested.\n"
+        prompt = "You are an elite, multi-agent AI trading committee (Sentiment Analyst, Macro Economist, Risk Manager). "
+        prompt += "Your job is to evaluate the provided inputs and decide the final action gate for each symbol. Output JSON as requested.\n\n"
         prompt += f"AVAILABLE CASH FOR NEW TRADES: Rs. {financial_data.get('available_balance', 0):.2f}\n"
         prompt += f"CURRENT OPEN POSITIONS: {json.dumps(financial_data.get('open_positions', []))}\n"
-        prompt += f"MACRO MOOD: {macro_mood}\n\n"
+        prompt += f"GLOBAL MACRO HEADLINES:\n{chr(10).join(global_headlines) if global_headlines else 'None'}\n\n"
         
-        prompt += "Guidelines:\n"
-        prompt += "- If sentiment is extremely negative, a crash is imminent, or FRAUD is detected, output FLATTEN.\n"
+        prompt += "Guidelines for Action Gate:\n"
+        prompt += "- If sentiment is extremely negative, a crash is imminent, or FRAUD DETECTED is true, output FLATTEN.\n"
         prompt += "- If EARNINGS_RISK is present (upcoming earnings), output VETO to avoid volatility.\n"
-        prompt += "- If PEAD_BULLISH is present (recent earnings beat), assign a higher conviction to ALLOW_BUY.\n"
+        prompt += "- If PEAD_BULLISH is present (recent earnings beat) and technicals are good, assign a higher conviction to ALLOW_BUY.\n"
         prompt += "- If available cash is very low and sentiment is weak, output VETO to preserve capital.\n"
-        prompt += "- Consider the last 10 RSI and MACD values for trend direction.\n\n"
+        prompt += "- Consider the last 10 RSI and MACD values for trend direction. If RSI is > 70 (overbought) -> favor ALLOW_SELL or VETO. If RSI < 30 (oversold) -> favor ALLOW_BUY.\n\n"
         
-        for sym, data in sentiment_data.items():
+        prompt += "PER-SYMBOL DATA:\n"
+        for sym, headlines in news_data.items():
             base_symbol = sym.replace(".NS", "")
-            sentiment_score = data.get('score', 0.0)
-            tech = technical_data.get(sym, {})
-            
             pead_status = pead_data.get(sym, "NEUTRAL")
             fraud_detected = fraud_data.get(sym, False)
+            tech = technical_data.get(sym, {})
             
             prompt += f"TICKER: {base_symbol}\n"
-            prompt += f"SENTIMENT SCORE: {sentiment_score}\n"
             prompt += f"PEAD STATUS: {pead_status}\n"
             prompt += f"FRAUD DETECTED: {fraud_detected}\n"
-            prompt += f"RSI (Last 10): {tech.get('RSI', [])}\n"
-            prompt += f"MACD (Last 10): {tech.get('MACD', [])}\n\n"
+            prompt += f"NEWS HEADLINES:\n{chr(10).join(headlines) if headlines else 'No news'}\n"
+            prompt += f"RSI (Last 10 5-min candles): {tech.get('RSI', [])}\n"
+            prompt += f"MACD (Last 10 5-min candles): {tech.get('MACD', [])}\n\n"
             
         result = await call_gemini_with_retry(self.client, self.rate_limiter, prompt, schema)
         gates = {}
-        if result and 'gates' in result:
-            for item in result['gates']:
-                gates[item['ticker']] = item.get('gate', 'VETO').upper()
-                print(f"[GATEKEEPER] {item['ticker']} -> Gate: {item.get('gate')} | Reasoning: {item.get('reasoning')}")
+        if result:
+            print(f"[COMMITTEE] Macro Mood: {result.get('macro_mood')} | Reasoning: {result.get('macro_reasoning')}")
+            if 'gates' in result:
+                for item in result['gates']:
+                    ticker = item['ticker']
+                    gate = item.get('gate', 'VETO').upper()
+                    gates[ticker] = gate
+                    print(f"[COMMITTEE] {ticker} -> Gate: {gate} | Conviction: {item.get('conviction_score')} | Sentiment: {item.get('sentiment')} | Reason: {item.get('reasoning')}")
         else:
-            print("[GATEKEEPER] LLM call failed, falling back to VETO.")
-            for sym in sentiment_data.keys():
+            print("[COMMITTEE] LLM call failed, falling back to VETO.")
+            for sym in news_data.keys():
                 gates[sym.replace(".NS", "")] = "VETO"
                 
         return gates
@@ -360,28 +245,24 @@ class BrainEngine:
             self.client = None
             self.rate_limiter = None
             self.news_agent = None
-            self.sentiment_analyst = None
-            self.macro_analyst = None
             self.earnings_agent = None
             self.fraud_agent = None
-            self.risk_gatekeeper = None
+            self.committee_agent = None
         else:
             self.client = genai.Client(api_key=api_key)
             self.rate_limiter = GeminiRateLimiter(max_calls=12, window_seconds=60.0)
-            self.news_agent = NewsAgent(self.client, self.rate_limiter)
-            self.sentiment_analyst = SentimentAnalyst(self.client, self.rate_limiter)
-            self.macro_analyst = MacroAnalyst(self.client, self.rate_limiter)
+            self.news_agent = NewsAgent()
             self.earnings_agent = EarningsAgent()
             self.fraud_agent = FraudAgent()
-            self.risk_gatekeeper = RiskGatekeeper(self.client, self.rate_limiter)
+            self.committee_agent = CommitteeAgent(self.client, self.rate_limiter)
 
     async def run(self, technicals):
         """
         The COLD PATH (1-15s)
         Runs asynchronously every 300 seconds (5 minutes) to fetch news and query Gemini.
-        Uses a 4-agent pipeline for analysis.
+        Uses a Single-Shot Committee Agent for analysis.
         """
-        print("Starting Multi-Agent Cold Path AI Sentiment Engine...")
+        print("Starting Single-Shot Committee Cold Path AI Engine...")
         if not self.client:
             self.gates = {s.replace(".NS", ""): "ALLOW_ALL" for s in self.watch_symbols}
             return
@@ -390,18 +271,18 @@ class BrainEngine:
         from src.config import Config
             
         while True:
-            # Pipeline Execution
-            news_data = await self.news_agent.run(self.watch_symbols, self.global_headlines)
-            
-            sentiment, macro = await asyncio.gather(
-                self.sentiment_analyst.run(news_data),
-                self.macro_analyst.run(self.global_headlines)
-            )
-            
+            # 1. Fetch Raw News
+            news_data = {}
+            for sym in self.watch_symbols:
+                news_data[sym] = await asyncio.to_thread(self.news_agent.fetch_yf_news, sym)
+                
+            # 2. Fetch Earnings PEAD (Deterministic)
             pead_data = await asyncio.to_thread(self.earnings_agent.run, self.watch_symbols)
+            
+            # 3. Detect Fraud (Deterministic)
             fraud_data = self.fraud_agent.run(news_data)
             
-            # Extract Technical Data
+            # 4. Extract Technical Data
             tech_data = {}
             for sym in self.watch_symbols:
                 upstox_sym = Config.SYMBOL_MAP.get(sym)
@@ -411,20 +292,28 @@ class BrainEngine:
                     macd_history = [m.macd for m in inds['macd'][-10:]] if len(inds['macd']) >= 10 else [m.macd for m in inds['macd'][:]]
                     tech_data[sym] = {"RSI": rsi_history, "MACD": macd_history}
             
-            # Extract Financial Data
+            # 5. Extract Financial Data
             fin_data = {
                 "available_balance": get_available_balance(),
                 "open_positions": list(_open_positions.values())
             }
             
-            new_gates = await self.risk_gatekeeper.run(sentiment, macro, tech_data, fin_data, pead_data, fraud_data)
+            # 6. Single-Shot AI Evaluation
+            new_gates = await self.committee_agent.run(
+                self.global_headlines, 
+                news_data, 
+                pead_data, 
+                fraud_data, 
+                tech_data, 
+                fin_data
+            )
             
             # Update instance state safely
             for base_sym, gate in new_gates.items():
                 if base_sym in self.gates:
                     self.gates[base_sym] = gate
 
-            await asyncio.sleep(300.0) # Refresh sentiment every 5 minutes (300 seconds)
+            await asyncio.sleep(300.0) # Refresh every 5 minutes
 
     async def poll_rss_feeds(self):
         rss_url = "https://www.livemint.com/rss/markets"
