@@ -216,31 +216,65 @@ class MacroAnalyst:
         return {'mood': 'NEUTRAL', 'score': 0.0, 'key_themes': []}
 
 class RiskGatekeeper:
-    def __init__(self):
-        pass
+    def __init__(self, client, rate_limiter):
+        self.client = client
+        self.rate_limiter = rate_limiter
 
-    def run(self, sentiment_data, macro_data):
-        print("[RiskGatekeeper] Evaluating gates...")
-        gates = {}
+    async def run(self, sentiment_data, macro_data, technical_data, financial_data):
+        print("[RiskGatekeeper] Evaluating gates via AI...")
+        schema = {
+            'type': 'OBJECT',
+            'properties': {
+                'gates': {
+                    'type': 'ARRAY',
+                    'items': {
+                        'type': 'OBJECT',
+                        'properties': {
+                            'ticker': {'type': 'STRING'},
+                            'gate': {'type': 'STRING', 'description': 'ALLOW_BUY, ALLOW_SELL, ALLOW_ALL, VETO, or FLATTEN'},
+                            'reasoning': {'type': 'STRING'}
+                        },
+                        'required': ['ticker', 'gate', 'reasoning']
+                    }
+                }
+            },
+            'required': ['gates']
+        }
+        
         macro_mood = macro_data.get('mood', 'NEUTRAL')
+        
+        prompt = "You are an expert AI risk gatekeeper for a stock trading system. "
+        prompt += "Your job is to decide the action gate for each symbol. Output JSON as requested.\n"
+        prompt += f"AVAILABLE CASH FOR NEW TRADES: Rs. {financial_data.get('available_balance', 0):.2f}\n"
+        prompt += f"CURRENT OPEN POSITIONS: {json.dumps(financial_data.get('open_positions', []))}\n"
+        prompt += f"MACRO MOOD: {macro_mood}\n\n"
+        
+        prompt += "Guidelines:\n"
+        prompt += "- If sentiment is extremely negative or a crash is imminent, output FLATTEN.\n"
+        prompt += "- If available cash is very low and sentiment is weak, output VETO to preserve capital.\n"
+        prompt += "- Consider the last 10 RSI and MACD values for trend direction.\n\n"
         
         for sym, data in sentiment_data.items():
             base_symbol = sym.replace(".NS", "")
             sentiment_score = data.get('score', 0.0)
+            tech = technical_data.get(sym, {})
             
-            gate = "ALLOW_ALL"
-            if macro_mood == "BEARISH" and sentiment_score < -0.7:
-                gate = "FLATTEN"
-            elif sentiment_score < -0.5 and macro_mood in ["NEUTRAL", "BEARISH"]:
-                gate = "ALLOW_SELL"
-            elif macro_mood == "BEARISH" and sentiment_score < -0.3:
-                gate = "VETO"
-            elif sentiment_score > 0.5 and macro_mood in ["NEUTRAL", "BULLISH"]:
-                gate = "ALLOW_BUY"
-                    
-            gates[base_symbol] = gate
-            print(f"[GATEKEEPER] {sym} -> Gate: {gate} | Sent: {sentiment_score:.2f} | Macro: {macro_mood}")
+            prompt += f"TICKER: {base_symbol}\n"
+            prompt += f"SENTIMENT SCORE: {sentiment_score}\n"
+            prompt += f"RSI (Last 10): {tech.get('RSI', [])}\n"
+            prompt += f"MACD (Last 10): {tech.get('MACD', [])}\n\n"
             
+        result = await call_gemini_with_retry(self.client, self.rate_limiter, prompt, schema)
+        gates = {}
+        if result and 'gates' in result:
+            for item in result['gates']:
+                gates[item['ticker']] = item.get('gate', 'VETO').upper()
+                print(f"[GATEKEEPER] {item['ticker']} -> Gate: {item.get('gate')} | Reasoning: {item.get('reasoning')}")
+        else:
+            print("[GATEKEEPER] LLM call failed, falling back to VETO.")
+            for sym in sentiment_data.keys():
+                gates[sym.replace(".NS", "")] = "VETO"
+                
         return gates
 
 class BrainEngine:
@@ -267,9 +301,9 @@ class BrainEngine:
             self.news_agent = NewsAgent(self.client, self.rate_limiter)
             self.sentiment_analyst = SentimentAnalyst(self.client, self.rate_limiter)
             self.macro_analyst = MacroAnalyst(self.client, self.rate_limiter)
-            self.risk_gatekeeper = RiskGatekeeper()
+            self.risk_gatekeeper = RiskGatekeeper(self.client, self.rate_limiter)
 
-    async def run(self):
+    async def run(self, technicals):
         """
         The COLD PATH (1-15s)
         Runs asynchronously every 300 seconds (5 minutes) to fetch news and query Gemini.
@@ -280,6 +314,9 @@ class BrainEngine:
             self.gates = {s.replace(".NS", ""): "ALLOW_ALL" for s in self.watch_symbols}
             return
             
+        from src.orders import get_available_balance, _open_positions
+        from src.config import Config
+            
         while True:
             # Pipeline Execution
             news_data = await self.news_agent.run(self.watch_symbols, self.global_headlines)
@@ -289,7 +326,23 @@ class BrainEngine:
                 self.macro_analyst.run(self.global_headlines)
             )
             
-            new_gates = self.risk_gatekeeper.run(sentiment, macro)
+            # Extract Technical Data
+            tech_data = {}
+            for sym in self.watch_symbols:
+                upstox_sym = Config.SYMBOL_MAP.get(sym)
+                if upstox_sym and upstox_sym in technicals.indicators:
+                    inds = technicals.indicators[upstox_sym]
+                    rsi_history = inds['rsi'][-10:] if len(inds['rsi']) >= 10 else inds['rsi'][:]
+                    macd_history = [m.macd for m in inds['macd'][-10:]] if len(inds['macd']) >= 10 else [m.macd for m in inds['macd'][:]]
+                    tech_data[sym] = {"RSI": rsi_history, "MACD": macd_history}
+            
+            # Extract Financial Data
+            fin_data = {
+                "available_balance": get_available_balance(),
+                "open_positions": list(_open_positions.values())
+            }
+            
+            new_gates = await self.risk_gatekeeper.run(sentiment, macro, tech_data, fin_data)
             
             # Update instance state safely
             for base_sym, gate in new_gates.items():

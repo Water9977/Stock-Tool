@@ -62,7 +62,7 @@ async def automated_execution_loop(feed: MarketFeed, technicals: TechnicalEngine
     
     # 3. Start Cold Path (Brain)
     asyncio.create_task(brain.poll_rss_feeds())
-    asyncio.create_task(brain.run())
+    asyncio.create_task(brain.run(technicals))
     
     # Execution Loop (Runs in main thread logic) to avoid spamming orders
     last_trade = {}
