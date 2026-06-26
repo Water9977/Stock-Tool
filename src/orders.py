@@ -13,6 +13,12 @@ class RiskEngine:
     def __init__(self):
         self.consecutive_losses = 0
 
+    def load_from_db(self):
+        """Restores the loss counter from DB so a container restart does not reset the circuit breaker."""
+        from src.db import get_consecutive_losses
+        self.consecutive_losses = get_consecutive_losses()
+        print(f"[RiskEngine] Restored consecutive_losses={self.consecutive_losses} from DB.")
+
     def evaluate_pre_trade(self) -> dict:
         current_pnl = get_realized_pnl()
         if current_pnl <= -Config.MAX_DAILY_LOSS:
@@ -22,10 +28,16 @@ class RiskEngine:
         return {"allowed": True, "reason": ""}
 
     def record_trade_result(self, pnl: float):
+        """Updates the in-memory loss counter. DB persistence happens in the sync DB writers
+        (which already hold a cursor) via persist_loss_counter()."""
         if pnl < 0:
             self.consecutive_losses += 1
         else:
             self.consecutive_losses = 0
+
+    def persist_loss_counter(self, cursor):
+        from src.db import set_consecutive_losses
+        set_consecutive_losses(self.consecutive_losses, cursor=cursor)
 
 risk_engine = RiskEngine()
 
@@ -193,6 +205,7 @@ def _process_closed_orders_sync(closed_orders):
             cursor.execute("UPDATE orders SET status = ?, price = ? WHERE id = ?", (status, executed_exit_price, order_id))
             update_realized_pnl(trade_pnl, cursor=cursor)
             print(f"[{trigger_reason}] Closed {mode} trade {order_id} for {symbol}. Net P&L: Rs.{trade_pnl:+.2f}")
+        risk_engine.persist_loss_counter(cursor)
         conn.commit()
     except Exception as e:
         print(f"Error updating DB for closed positions: {e}")
@@ -283,6 +296,7 @@ def _flatten_positions_db_sync(updates):
             status = "VIRTUAL_CLOSED" if mode == "VIRTUAL" else "LIVE_CLOSED"
             cursor.execute("UPDATE orders SET status = ?, price = ? WHERE id = ?", (status, executed_exit_price, order_id))
             update_realized_pnl(pnl, cursor=cursor)
+        risk_engine.persist_loss_counter(cursor)
         conn.commit()
     except Exception as e:
         print(f"[FLATTEN ERROR] DB Update failed: {e}")

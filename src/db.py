@@ -30,9 +30,15 @@ def _init_db_sync():
         CREATE TABLE IF NOT EXISTS daily_stats (
             date TEXT PRIMARY KEY,
             starting_capital REAL NOT NULL,
-            realized_pnl REAL DEFAULT 0.0
+            realized_pnl REAL DEFAULT 0.0,
+            consecutive_losses INTEGER DEFAULT 0
         )
     """)
+    # Migration for pre-existing DBs created before consecutive_losses column existed.
+    try:
+        cursor.execute("ALTER TABLE daily_stats ADD COLUMN consecutive_losses INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
     conn.commit()
     conn.close()
 
@@ -95,6 +101,31 @@ def update_realized_pnl(amount: float, cursor=None):
             "UPDATE daily_stats SET realized_pnl = realized_pnl + ? WHERE date = ?",
             (amount, today_str)
         )
+        conn.commit()
+    finally:
+        conn.close()
+
+def get_consecutive_losses() -> int:
+    today_str = date.today().isoformat()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT consecutive_losses FROM daily_stats WHERE date = ?", (today_str,))
+        row = cursor.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    finally:
+        conn.close()
+
+def set_consecutive_losses(count: int, cursor=None):
+    today_str = date.today().isoformat()
+    if cursor is not None:
+        cursor.execute("UPDATE daily_stats SET consecutive_losses = ? WHERE date = ?", (count, today_str))
+        return
+
+    conn = get_connection()
+    cursor_loc = conn.cursor()
+    try:
+        cursor_loc.execute("UPDATE daily_stats SET consecutive_losses = ? WHERE date = ?", (count, today_str))
         conn.commit()
     finally:
         conn.close()

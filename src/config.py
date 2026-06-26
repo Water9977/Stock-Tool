@@ -14,16 +14,27 @@ class Config:
     TOTP_SECRET = os.getenv("UPSTOX_TOTP_SECRET")
     STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", 2000.0))
     MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", 500.0))
-    MAX_CAPITAL_PER_TRADE = float(os.getenv("MAX_CAPITAL_PER_TRADE", 2000.0))
-    
+    # Per-trade cap kept below total capital so Rs.2000 can hold 2-3 concurrent positions (diversification).
+    MAX_CAPITAL_PER_TRADE = float(os.getenv("MAX_CAPITAL_PER_TRADE", 700.0))
+
     TRADING_MODE = os.getenv("TRADING_MODE", "VIRTUAL").upper()
-    
+
+    # OHLC candle aggregation period (seconds). Live NSE uses 300 (5-min candles).
+    # For VIRTUAL end-to-end testing this can be lowered so indicators populate fast
+    # enough to actually generate trades within a short simulation window.
+    CANDLE_PERIOD_SECONDS = int(os.getenv("CANDLE_PERIOD_SECONDS", 300))
+
+    # VIRTUAL-mode auto-flatten + suspend timer (hours).
+    VIRTUAL_RUNTIME_HOURS = float(os.getenv("VIRTUAL_RUNTIME_HOURS", 5.0))
+
+    # Watchlist constrained to liquid NSE large-caps priced under Rs.600 so every symbol is
+    # individually tradeable within a Rs.2000 account. ISINs verified against NSE/Upstox.
     SYMBOL_MAP = {
-        "RELIANCE.NS":  "NSE_EQ|INE002A01018",
-        "TCS.NS":       "NSE_EQ|INE467B01029",
-        "INFY.NS":      "NSE_EQ|INE009A01021",
-        "SBIN.NS":      "NSE_EQ|INE062A01020",
-        "AXISBANK.NS":  "NSE_EQ|INE238A01034",
+        "SBIN.NS":      "NSE_EQ|INE062A01020",  # ~Rs.580
+        "ITC.NS":       "NSE_EQ|INE154A01025",  # ~Rs.290
+        "NTPC.NS":      "NSE_EQ|INE733E01010",  # ~Rs.352
+        "ONGC.NS":      "NSE_EQ|INE213A01029",  # ~Rs.233
+        "COALINDIA.NS": "NSE_EQ|INE522F01014",  # ~Rs.450
     }
 
     @classmethod

@@ -9,7 +9,7 @@ from src.config import Config
 from src.db import init_db, start_day_stats, start_day_stats_async, reset_simulation, get_connection, get_realized_pnl_async
 from src.auth import authenticate_upstox
 from src.market_feed import MarketFeed
-from src.orders import place_order, monitor_open_positions, sync_open_positions, flatten_positions_for_symbol, clear_open_positions
+from src.orders import place_order, monitor_open_positions, sync_open_positions, flatten_positions_for_symbol, clear_open_positions, risk_engine
 from src.technicals import TechnicalEngine
 from src.brain import BrainEngine
 
@@ -135,9 +135,10 @@ async def shutdown_scheduler():
     In PAPER / LIVE mode: Flattens positions and suspends trading at 15:25 IST (market close).
     """
     if Config.TRADING_MODE == "VIRTUAL":
-        print("[SYSTEM] 5-hour virtual operational timer started.")
-        await asyncio.sleep(5 * 3600)  # Sleep for 5 hours (18,000 seconds)
-        print("[SYSTEM] 5 hours elapsed. Initiating automated position flattening and suspension...")
+        runtime_seconds = Config.VIRTUAL_RUNTIME_HOURS * 3600
+        print(f"[SYSTEM] {Config.VIRTUAL_RUNTIME_HOURS}-hour virtual operational timer started.")
+        await asyncio.sleep(runtime_seconds)
+        print(f"[SYSTEM] {Config.VIRTUAL_RUNTIME_HOURS} hours elapsed. Initiating automated position flattening and suspension...")
     else:
         ist = pytz.timezone("Asia/Kolkata")
         print("[SYSTEM] Market-close auto-flatten scheduler started (active for 15:25 IST on weekdays).")
@@ -176,7 +177,10 @@ async def startup_event():
 
     # 3. Setup today's starting stats (loaded from config)
     await start_day_stats_async(Config.STARTING_CAPITAL)
-    
+
+    # 3b. Restore circuit-breaker loss counter so a restart mid-streak does not reset it
+    await asyncio.to_thread(risk_engine.load_from_db)
+
     # 3. Retrieve daily access token (programmatic login)
     try:
         state["access_token"] = await authenticate_upstox()
@@ -299,7 +303,7 @@ async def reset_simulation_endpoint():
 
 
 class BacktestRequest(BaseModel):
-    symbol: str = "RELIANCE.NS"
+    symbol: str = "SBIN.NS"
     interval: str = "5m"
     period: str = "5d"
 

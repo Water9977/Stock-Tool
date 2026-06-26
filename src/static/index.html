@@ -737,11 +737,11 @@
                         <div style="display: flex; flex-direction: column; gap: 0.4rem;">
                             <label style="font-size: 0.75rem; color: var(--text-secondary); font-weight: 600;">SYMBOL</label>
                             <select id="bt-symbol" style="background: rgba(255,255,255,0.05); border: 1px solid var(--card-border); color: var(--text-primary); padding: 0.6rem 1rem; border-radius: 8px; font-family: 'Inter', sans-serif; font-size: 0.875rem; min-width: 160px;">
-                                <option value="RELIANCE.NS">RELIANCE</option>
-                                <option value="TCS.NS">TCS</option>
-                                <option value="INFY.NS">INFY</option>
                                 <option value="SBIN.NS">SBIN</option>
-                                <option value="AXISBANK.NS">AXISBANK</option>
+                                <option value="ITC.NS">ITC</option>
+                                <option value="NTPC.NS">NTPC</option>
+                                <option value="ONGC.NS">ONGC</option>
+                                <option value="COALINDIA.NS">COALINDIA</option>
                             </select>
                         </div>
                         <div style="display: flex; flex-direction: column; gap: 0.4rem;">
@@ -816,11 +816,11 @@
 
     <script>
         const SYMBOLS_MAP = {
-            "NSE_EQ|INE002A01018": { name: "RELIANCE", yf: "RELIANCE.NS", base: "RELIANCE" },
-            "NSE_EQ|INE467B01029": { name: "TCS", yf: "TCS.NS", base: "TCS" },
-            "NSE_EQ|INE009A01021": { name: "INFY", yf: "INFY.NS", base: "INFY" },
             "NSE_EQ|INE062A01020": { name: "SBIN", yf: "SBIN.NS", base: "SBIN" },
-            "NSE_EQ|INE238A01034": { name: "AXISBANK", yf: "AXISBANK.NS", base: "AXISBANK" }
+            "NSE_EQ|INE154A01025": { name: "ITC", yf: "ITC.NS", base: "ITC" },
+            "NSE_EQ|INE733E01010": { name: "NTPC", yf: "NTPC.NS", base: "NTPC" },
+            "NSE_EQ|INE213A01029": { name: "ONGC", yf: "ONGC.NS", base: "ONGC" },
+            "NSE_EQ|INE522F01014": { name: "COALINDIA", yf: "COALINDIA.NS", base: "COALINDIA" }
         };
 
         let currentPrices = {};

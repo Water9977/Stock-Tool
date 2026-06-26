@@ -24,20 +24,20 @@ from src.config import Config
 #  Instrument keys (Upstox format)
 # ─────────────────────────────────────────────────────────────────────────────
 INSTRUMENT_KEYS = [
-    "NSE_EQ|INE002A01018",  # RELIANCE
-    "NSE_EQ|INE467B01029",  # TCS
-    "NSE_EQ|INE009A01021",  # INFY
     "NSE_EQ|INE062A01020",  # SBIN
-    "NSE_EQ|INE238A01034",  # AXISBANK
+    "NSE_EQ|INE154A01025",  # ITC
+    "NSE_EQ|INE733E01010",  # NTPC
+    "NSE_EQ|INE213A01029",  # ONGC
+    "NSE_EQ|INE522F01014",  # COALINDIA
 ]
 
-# Base LTP seeds for virtual mode (realistic NSE prices)
+# Base LTP seeds for virtual mode (realistic NSE prices, mid-2026)
 _BASE_PRICES = {
-    "NSE_EQ|INE002A01018": 2450.0,
-    "NSE_EQ|INE467B01029": 3300.0,
-    "NSE_EQ|INE009A01021": 1500.0,
-    "NSE_EQ|INE062A01020": 580.0,
-    "NSE_EQ|INE238A01034": 2600.0,
+    "NSE_EQ|INE062A01020": 580.0,   # SBIN
+    "NSE_EQ|INE154A01025": 290.0,   # ITC
+    "NSE_EQ|INE733E01010": 352.0,   # NTPC
+    "NSE_EQ|INE213A01029": 233.0,   # ONGC
+    "NSE_EQ|INE522F01014": 450.0,   # COALINDIA
 }
 
 
@@ -97,7 +97,7 @@ class MarketFeed:
         self.price_cache[symbol] = price
         
         import time
-        current_period = int(time.time() // 300)  # 5-minute periods
+        current_period = int(time.time() // Config.CANDLE_PERIOD_SECONDS)
         
         if symbol not in self.candles:
             self.candles[symbol] = {'period': current_period, 'open': price, 'high': price, 'low': price, 'close': price}

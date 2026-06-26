@@ -6,9 +6,6 @@ from google import genai
 import aiohttp
 import feedparser
 import json
-import pandas as pd
-from datetime import datetime, timezone
-import hashlib
 
 class GeminiRateLimiter:
     """
@@ -86,57 +83,28 @@ class NewsAgent:
             print(f"[NewsAgent ERROR] Failed fetching news for {ticker}: {e}")
             return []
 
-class EarningsAgent:
-    """
-    Checks YFinance for PEAD (Post-Earnings Announcement Drift) and Earnings Risk.
-    Deterministic, no LLM calls.
-    """
-    def __init__(self):
-        pass
-        
-    def run(self, watch_symbols):
-        print("[EarningsAgent] Scanning for PEAD signals and earnings risk...")
-        earnings_data = {}
-        now = datetime.now(timezone.utc)
-        
-        for sym in watch_symbols:
-            try:
-                t = yf.Ticker(sym)
-                df = t.earnings_dates
-                pead_status = "NEUTRAL"
-                
-                if df is not None and not df.empty:
-                    for dt, row in df.iterrows():
-                        if dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=timezone.utc)
-                            
-                        delta_days = (dt - now).total_seconds() / 86400.0
-                        
-                        if 0 <= delta_days <= 3:
-                            pead_status = "EARNINGS_RISK"
-                            break
-                        elif -7 <= delta_days < 0:
-                            surprise = row.get("Surprise(%)", 0)
-                            if pd.notna(surprise):
-                                if surprise > 0:
-                                    pead_status = "PEAD_BULLISH"
-                                elif surprise < 0:
-                                    pead_status = "PEAD_BEARISH"
-                            break
-                            
-                earnings_data[sym] = pead_status
-            except Exception as e:
-                print(f"    [!] Error fetching earnings for {sym}: {e}")
-                earnings_data[sym] = "NEUTRAL"
-                
-        return earnings_data
-
 class FraudAgent:
     """
-    Deterministic string matching for SEBI/Fraud red flags in news.
+    Deterministic string matching for governance / fraud red flags in news.
+    Tuned for Indian markets (SEBI/RBI/ED/NCLT specific signals).
     """
     def __init__(self):
-        self.red_flags = ["fraud", "sebi", "scam", "investigation", "auditor resign", "default", "penalty"]
+        self.red_flags = [
+            # Generic governance
+            "fraud", "scam", "embezzle", "siphon", "shell company", "related party",
+            # Auditor / accounting
+            "auditor resign", "forensic audit", "qualified opinion", "restate accounts",
+            # Regulator action (India-specific)
+            "sebi ban", "sebi penalty", "sebi order", "sebi probe", "sebi bars",
+            "rbi penalty", "rbi action", "rbi restriction",
+            "ed raid", "enforcement directorate", "income tax raid", "cbi", "sfio",
+            # Promoter / debt distress
+            "promoter pledge", "pledged shares", "promoter selling", "stake sale by promoter",
+            "wilful defaulter", "loan default", "debt default", "npa", "bad loans",
+            "nclt", "insolvency", "ibc", "bankruptcy",
+            # Misc
+            "investigation", "money laundering", "accounting irregular",
+        ]
 
     def run(self, news_data):
         print("[FraudAgent] Scanning news for governance red flags...")
@@ -161,7 +129,7 @@ class CommitteeAgent:
         self.client = client
         self.rate_limiter = rate_limiter
 
-    async def run(self, global_headlines, news_data, pead_data, fraud_data, technical_data, financial_data):
+    async def run(self, global_headlines, news_data, fraud_data, technical_data, financial_data):
         print("[CommitteeAgent] Evaluating Sentiment, Macro, and Gates via single AI call...")
         schema = {
             'type': 'OBJECT',
@@ -177,7 +145,7 @@ class CommitteeAgent:
                             'gate': {'type': 'STRING', 'description': 'ALLOW_BUY, ALLOW_SELL, ALLOW_ALL, VETO, or FLATTEN'},
                             'conviction_score': {'type': 'NUMBER', 'description': '0.0 to 1.0 representing confidence'},
                             'sentiment': {'type': 'NUMBER', 'description': '-1.0 to 1.0 based on news'},
-                            'reasoning': {'type': 'STRING', 'description': 'Why this gate was chosen based on tech, news, fraud, PEAD.'}
+                            'reasoning': {'type': 'STRING', 'description': 'Why this gate was chosen based on tech, news, and fraud signals.'}
                         },
                         'required': ['ticker', 'gate', 'conviction_score', 'sentiment', 'reasoning']
                     }
@@ -194,20 +162,16 @@ class CommitteeAgent:
         
         prompt += "Guidelines for Action Gate:\n"
         prompt += "- If sentiment is extremely negative, a crash is imminent, or FRAUD DETECTED is true, output FLATTEN.\n"
-        prompt += "- If EARNINGS_RISK is present (upcoming earnings), output VETO to avoid volatility.\n"
-        prompt += "- If PEAD_BULLISH is present (recent earnings beat) and technicals are good, assign a higher conviction to ALLOW_BUY.\n"
         prompt += "- If available cash is very low and sentiment is weak, output VETO to preserve capital.\n"
         prompt += "- Consider the last 10 RSI and MACD values for trend direction. If RSI is > 70 (overbought) -> favor ALLOW_SELL or VETO. If RSI < 30 (oversold) -> favor ALLOW_BUY.\n\n"
-        
+
         prompt += "PER-SYMBOL DATA:\n"
         for sym, headlines in news_data.items():
             base_symbol = sym.replace(".NS", "")
-            pead_status = pead_data.get(sym, "NEUTRAL")
             fraud_detected = fraud_data.get(sym, False)
             tech = technical_data.get(sym, {})
-            
+
             prompt += f"TICKER: {base_symbol}\n"
-            prompt += f"PEAD STATUS: {pead_status}\n"
             prompt += f"FRAUD DETECTED: {fraud_detected}\n"
             prompt += f"NEWS HEADLINES:\n{chr(10).join(headlines) if headlines else 'No news'}\n"
             prompt += f"RSI (Last 10 5-min candles): {tech.get('RSI', [])}\n"
@@ -233,7 +197,7 @@ class CommitteeAgent:
 class BrainEngine:
     def __init__(self):
         self.watch_symbols = [
-            "RELIANCE.NS", "TCS.NS", "INFY.NS", "SBIN.NS", "AXISBANK.NS"
+            "SBIN.NS", "ITC.NS", "NTPC.NS", "ONGC.NS", "COALINDIA.NS"
         ]
         self.gates = {s.replace(".NS", ""): "VETO" for s in self.watch_symbols}
         self.global_headlines = []
@@ -245,14 +209,12 @@ class BrainEngine:
             self.client = None
             self.rate_limiter = None
             self.news_agent = None
-            self.earnings_agent = None
             self.fraud_agent = None
             self.committee_agent = None
         else:
             self.client = genai.Client(api_key=api_key)
             self.rate_limiter = GeminiRateLimiter(max_calls=12, window_seconds=60.0)
             self.news_agent = NewsAgent()
-            self.earnings_agent = EarningsAgent()
             self.fraud_agent = FraudAgent()
             self.committee_agent = CommitteeAgent(self.client, self.rate_limiter)
 
@@ -276,35 +238,33 @@ class BrainEngine:
             for sym in self.watch_symbols:
                 news_data[sym] = await asyncio.to_thread(self.news_agent.fetch_yf_news, sym)
                 
-            # 2. Fetch Earnings PEAD (Deterministic)
-            pead_data = await asyncio.to_thread(self.earnings_agent.run, self.watch_symbols)
-            
-            # 3. Detect Fraud (Deterministic)
+            # 2. Detect Fraud (Deterministic)
             fraud_data = self.fraud_agent.run(news_data)
-            
-            # 4. Extract Technical Data
+
+            # 3. Extract Technical Data
             tech_data = {}
             for sym in self.watch_symbols:
                 upstox_sym = Config.SYMBOL_MAP.get(sym)
                 if upstox_sym and upstox_sym in technicals.indicators:
                     inds = technicals.indicators[upstox_sym]
-                    rsi_history = inds['rsi'][-10:] if len(inds['rsi']) >= 10 else inds['rsi'][:]
-                    macd_history = [m.macd for m in inds['macd'][-10:]] if len(inds['macd']) >= 10 else [m.macd for m in inds['macd'][:]]
+                    # talipp pads its output lists with None during the indicator warmup period,
+                    # so drop None entries before reading values / attributes.
+                    rsi_history = [round(r, 2) for r in inds['rsi'][-10:] if r is not None]
+                    macd_history = [round(m.macd, 4) for m in inds['macd'][-10:] if m is not None and m.macd is not None]
                     tech_data[sym] = {"RSI": rsi_history, "MACD": macd_history}
             
-            # 5. Extract Financial Data
+            # 4. Extract Financial Data
             fin_data = {
                 "available_balance": get_available_balance(),
                 "open_positions": list(_open_positions.values())
             }
-            
-            # 6. Single-Shot AI Evaluation
+
+            # 5. Single-Shot AI Evaluation
             new_gates = await self.committee_agent.run(
-                self.global_headlines, 
-                news_data, 
-                pead_data, 
-                fraud_data, 
-                tech_data, 
+                self.global_headlines,
+                news_data,
+                fraud_data,
+                tech_data,
                 fin_data
             )
             

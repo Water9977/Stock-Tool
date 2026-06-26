@@ -5,8 +5,8 @@ Feeds historical OHLCV data from yfinance into the TechnicalEngine tick-by-tick
 to simulate how the strategy would have performed historically.
 
 Usage:
-    python src/backtest.py --symbol RELIANCE.NS --interval 5m --period 5d
-    python src/backtest.py --symbol TCS.NS --interval 1d --period 6mo
+    python src/backtest.py --symbol SBIN.NS --interval 5m --period 5d
+    python src/backtest.py --symbol ITC.NS --interval 1d --period 6mo
 """
 import asyncio
 import sys
@@ -28,11 +28,11 @@ from src.technicals import TechnicalEngine
 
 # Mapping from Yahoo Finance ticker to Upstox instrument key
 SYMBOL_MAP = {
-    "RELIANCE.NS":  "NSE_EQ|INE002A01018",
-    "TCS.NS":       "NSE_EQ|INE467B01029",
-    "INFY.NS":      "NSE_EQ|INE009A01021",
     "SBIN.NS":      "NSE_EQ|INE062A01020",
-    "AXISBANK.NS":  "NSE_EQ|INE238A01034",
+    "ITC.NS":       "NSE_EQ|INE154A01025",
+    "NTPC.NS":      "NSE_EQ|INE733E01010",
+    "ONGC.NS":      "NSE_EQ|INE213A01029",
+    "COALINDIA.NS": "NSE_EQ|INE522F01014",
 }
 
 
@@ -175,7 +175,7 @@ class BacktestResult:
                 )
 
 
-async def run_backtest(yf_symbol: str = "RELIANCE.NS", interval: str = "5m", period: str = "5d"):
+async def run_backtest(yf_symbol: str = "SBIN.NS", interval: str = "5m", period: str = "5d"):
     """
     Downloads historical data from Yahoo Finance and replays it tick-by-tick
     through the TechnicalEngine to generate backtest signals.
@@ -268,7 +268,7 @@ async def run_backtest(yf_symbol: str = "RELIANCE.NS", interval: str = "5m", per
 
 def main():
     parser = argparse.ArgumentParser(description="Stock Tool — Historical Backtester")
-    parser.add_argument("--symbol", default="RELIANCE.NS", help="Yahoo Finance ticker (default: RELIANCE.NS)")
+    parser.add_argument("--symbol", default="SBIN.NS", help="Yahoo Finance ticker (default: RELIANCE.NS)")
     parser.add_argument("--interval", default="5m", help="Bar interval: 1m, 5m, 15m, 1h, 1d (default: 5m)")
     parser.add_argument("--period", default="5d", help="History period: 1d, 5d, 1mo, 3mo, 6mo, 1y (default: 5d)")
     args = parser.parse_args()
