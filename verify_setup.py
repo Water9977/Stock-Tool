@@ -33,14 +33,14 @@ async def test_pipeline():
     await asyncio.sleep(1.0) # Wait for simulator to tick
     
     # Check simulated stock price
-    sbin_price = feed.get_price("NSE_EQ|INE062A01020")
-    print(f"[OK] Simulated price for SBIN (LTP): Rs. {sbin_price}")
-    assert sbin_price > 0, "Price should be greater than 0"
+    bankbaroda_price = feed.get_price("NSE_EQ|INE028A01039")
+    print(f"[OK] Simulated price for BANKBARODA (LTP): Rs. {bankbaroda_price}")
+    assert bankbaroda_price > 0, "Price should be greater than 0"
 
     # 5. Place a simulated order
-    print("Placing a simulated BUY order for 1 share of SBIN...")
+    print("Placing a simulated BUY order for 1 share of BANKBARODA...")
     res = await place_order(
-        symbol="NSE_EQ|INE062A01020",
+        symbol="NSE_EQ|INE028A01039",
         quantity=1,
         transaction_type="BUY",
         access_token=token,
