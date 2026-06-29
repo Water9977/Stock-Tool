@@ -6,6 +6,7 @@ from google import genai
 import aiohttp
 import feedparser
 import json
+from src.config import Config
 
 class GeminiRateLimiter:
     """
@@ -196,9 +197,7 @@ class CommitteeAgent:
 
 class BrainEngine:
     def __init__(self):
-        self.watch_symbols = [
-            "SBIN.NS", "ITC.NS", "NTPC.NS", "ONGC.NS", "COALINDIA.NS"
-        ]
+        self.watch_symbols = list(Config.SYMBOL_MAP.keys())
         self.gates = {s.replace(".NS", ""): "VETO" for s in self.watch_symbols}
         self.global_headlines = []
         

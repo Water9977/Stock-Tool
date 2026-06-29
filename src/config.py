@@ -28,13 +28,13 @@ class Config:
     VIRTUAL_RUNTIME_HOURS = float(os.getenv("VIRTUAL_RUNTIME_HOURS", 5.0))
 
     # Watchlist constrained to liquid NSE large-caps priced under Rs.600 so every symbol is
-    # individually tradeable within a Rs.2000 account. ISINs verified against NSE/Upstox.
+    # individually tradeable within a Rs.700 per-trade cap. ISINs verified against NSE/Upstox.
     SYMBOL_MAP = {
-        "SBIN.NS":      "NSE_EQ|INE062A01020",  # ~Rs.580
-        "ITC.NS":       "NSE_EQ|INE154A01025",  # ~Rs.290
-        "NTPC.NS":      "NSE_EQ|INE733E01010",  # ~Rs.352
-        "ONGC.NS":      "NSE_EQ|INE213A01029",  # ~Rs.233
-        "COALINDIA.NS": "NSE_EQ|INE522F01014",  # ~Rs.450
+        "BANKBARODA.NS": "NSE_EQ|INE028A01039",  # ~Rs.275 (replaced SBIN which hit Rs.1037)
+        "ITC.NS":        "NSE_EQ|INE154A01025",  # ~Rs.291
+        "NTPC.NS":       "NSE_EQ|INE733E01010",  # ~Rs.356
+        "ONGC.NS":       "NSE_EQ|INE213A01029",  # ~Rs.235
+        "COALINDIA.NS":  "NSE_EQ|INE522F01014",  # ~Rs.440
     }
 
     @classmethod

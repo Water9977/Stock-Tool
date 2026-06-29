@@ -24,20 +24,20 @@ from src.config import Config
 #  Instrument keys (Upstox format)
 # ─────────────────────────────────────────────────────────────────────────────
 INSTRUMENT_KEYS = [
-    "NSE_EQ|INE062A01020",  # SBIN
+    "NSE_EQ|INE028A01039",  # BANKBARODA (~Rs.275, replaced SBIN which hit Rs.1037)
     "NSE_EQ|INE154A01025",  # ITC
     "NSE_EQ|INE733E01010",  # NTPC
     "NSE_EQ|INE213A01029",  # ONGC
     "NSE_EQ|INE522F01014",  # COALINDIA
 ]
 
-# Base LTP seeds for virtual mode (realistic NSE prices, mid-2026)
+# Base LTP seeds — realistic NSE prices June 2026. Used only until first REST/WS tick arrives.
 _BASE_PRICES = {
-    "NSE_EQ|INE062A01020": 580.0,   # SBIN
-    "NSE_EQ|INE154A01025": 290.0,   # ITC
-    "NSE_EQ|INE733E01010": 352.0,   # NTPC
-    "NSE_EQ|INE213A01029": 233.0,   # ONGC
-    "NSE_EQ|INE522F01014": 450.0,   # COALINDIA
+    "NSE_EQ|INE028A01039": 275.0,   # BANKBARODA
+    "NSE_EQ|INE154A01025": 291.0,   # ITC
+    "NSE_EQ|INE733E01010": 356.0,   # NTPC
+    "NSE_EQ|INE213A01029": 235.0,   # ONGC
+    "NSE_EQ|INE522F01014": 440.0,   # COALINDIA
 }
 
 
@@ -235,20 +235,39 @@ class MarketFeed:
             print(f"[FEED] Protobuf decode error: {e}")
         return ticks
 
-    async def _stale_feed_watchdog(self, ws):
-        """Monitors for stale ticks (no activity > 30s) and triggers a force reconnection."""
-        while self.is_running and ws.open:
-            await asyncio.sleep(5)
-            now = asyncio.get_running_loop().time()
-            if self.last_tick_time and now - self.last_tick_time > 30:
-                print("[FEED] WATCHDOG: Stale feed detected (>30s without ticks). Forcing reconnect...")
-                await ws.close()
-                break
+    async def _run_rest_poll_feed(self):
+        """
+        Polls Upstox LTP REST API every 1s.
+        Used as primary live feed for non-Plus accounts where WebSocket streaming is unavailable.
+        """
+        keys_encoded = "%2C".join(k.replace("|", "%7C") for k in INSTRUMENT_KEYS)
+        url = f"https://api.upstox.com/v2/market-quote/ltp?instrument_key={keys_encoded}"
+        print("[FEED] REST poll feed active (polling LTP every 1s).")
+        while self.is_running:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    r = await client.get(url, headers={
+                        "Authorization": f"Bearer {self._access_token}",
+                        "Accept": "application/json"
+                    })
+                    if r.status_code == 200:
+                        data = r.json().get("data", {})
+                        for quote in data.values():
+                            ltp = quote.get("last_price", 0.0)
+                            token = quote.get("instrument_token", "")
+                            if ltp > 0 and token:
+                                await self._process_tick(token, ltp)
+                    else:
+                        print(f"[FEED] REST poll HTTP {r.status_code}: {r.text[:120]}")
+            except Exception as e:
+                print(f"[FEED] REST poll error: {e}")
+            await asyncio.sleep(1.0)
 
     async def _run_live_feed(self):
         """
         Connects to the real Upstox V3 WebSocket market data feed.
-        Handles reconnection with exponential back-off.
+        Falls back to REST polling if no real ticks arrive within 30s (free-plan accounts
+        get a subscription ack but no streaming data — REST polling works on all plans).
         """
         pb2 = _load_proto_module()
         if pb2 is None:
@@ -259,71 +278,76 @@ class MarketFeed:
             return
 
         print("[FEED] Protobuf module loaded. Connecting to Upstox live feed...")
-        retry_delay = 5  # seconds
+        retry_delay = 5
 
-        while self.is_running:
-            try:
-                authorized_uri = await self._get_authorized_uri()
-                if not authorized_uri:
-                    print(f"[FEED] Will retry authorization in {retry_delay}s...")
-                    await asyncio.sleep(retry_delay)
-                    retry_delay = min(retry_delay * 2, 60)
-                    continue
+        # Try WebSocket first; fall back to REST poll if no real ticks within 30s.
+        real_tick_event = asyncio.Event()
 
-                # Build SSL context — Upstox WSS uses standard TLS
-                ssl_context = ssl.create_default_context()
+        async def _ws_attempt():
+            nonlocal retry_delay
+            while self.is_running:
+                try:
+                    authorized_uri = await self._get_authorized_uri()
+                    if not authorized_uri:
+                        print(f"[FEED] Will retry authorization in {retry_delay}s...")
+                        await asyncio.sleep(retry_delay)
+                        retry_delay = min(retry_delay * 2, 60)
+                        continue
 
-                async with websockets.connect(
-                    authorized_uri,
-                    ssl=ssl_context,
-                    ping_interval=20,
-                    ping_timeout=10,
-                ) as ws:
-                    print("[FEED] WebSocket connected. Sending subscription request...")
-                    await ws.send(self._build_subscription_message())
-                    print(f"[FEED] Subscribed to {len(INSTRUMENT_KEYS)} instruments.")
-                    retry_delay = 5   # reset on successful connect
+                    ssl_context = ssl.create_default_context()
+                    async with websockets.connect(
+                        authorized_uri,
+                        ssl=ssl_context,
+                        ping_interval=20,
+                        ping_timeout=10,
+                    ) as ws:
+                        print("[FEED] WebSocket connected. Sending subscription request...")
+                        await ws.send(self._build_subscription_message())
+                        print(f"[FEED] Subscribed to {len(INSTRUMENT_KEYS)} instruments.")
+                        retry_delay = 5
 
-                    self.last_tick_time = asyncio.get_running_loop().time()
-                    watchdog_task = asyncio.create_task(self._stale_feed_watchdog(ws))
-
-                    try:
                         async for message in ws:
                             if not self.is_running:
-                                break
-
-                            self.last_tick_time = asyncio.get_running_loop().time()
-
-                            # All frames from Upstox V3 are binary Protobuf
+                                return
                             if isinstance(message, bytes):
                                 ticks = self._decode_protobuf_tick(message, pb2)
                                 for tick in ticks:
-                                    symbol = tick["symbol"]
-                                    price = tick["price"]
-                                    # Aggregate tick into 5-min candle (Warm Path) and update LTP (Hot Path)
-                                    await self._process_tick(symbol, price)
-
+                                    real_tick_event.set()
+                                    await self._process_tick(tick["symbol"], tick["price"])
                             elif isinstance(message, str):
-                                # Upstox sometimes sends a JSON heartbeat/status message
                                 try:
                                     payload = json.loads(message)
                                     if payload.get("type") == "error":
                                         print(f"[FEED] Server error: {payload}")
                                 except json.JSONDecodeError:
                                     pass
-                    finally:
-                        watchdog_task.cancel()
 
-            except websockets.exceptions.ConnectionClosedOK:
-                print("[FEED] WebSocket closed normally. Reconnecting...")
-            except websockets.exceptions.ConnectionClosedError as e:
-                print(f"[FEED] WebSocket connection dropped: {e}. Reconnecting in {retry_delay}s...")
-            except Exception as e:
-                print(f"[FEED] Unexpected error in live feed: {e}. Retrying in {retry_delay}s...")
+                except websockets.exceptions.ConnectionClosedOK:
+                    print("[FEED] WebSocket closed normally. Reconnecting...")
+                except websockets.exceptions.ConnectionClosedError as e:
+                    print(f"[FEED] WebSocket connection dropped: {e}. Reconnecting in {retry_delay}s...")
+                except Exception as e:
+                    print(f"[FEED] Unexpected error in live feed: {e}. Retrying in {retry_delay}s...")
 
-            if self.is_running:
-                await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 60)
+                if self.is_running:
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 60)
+
+        ws_task = asyncio.create_task(_ws_attempt())
+
+        # Give WebSocket 30s to deliver real ticks. If none, fall back to REST polling.
+        try:
+            await asyncio.wait_for(asyncio.shield(real_tick_event.wait()), timeout=30.0)
+            print("[FEED] WebSocket streaming confirmed. Running in WS mode.")
+            await ws_task  # keep WS running for the rest of the session
+        except asyncio.TimeoutError:
+            print("[FEED] No WS ticks in 30s (free plan). Cancelling WS, switching to REST polling.")
+            ws_task.cancel()
+            try:
+                await ws_task
+            except asyncio.CancelledError:
+                pass
+            await self._run_rest_poll_feed()
 
     # ─────────────────────────────────────────────────────────────────────────
     #  Helpers
