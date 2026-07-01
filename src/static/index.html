@@ -584,6 +584,7 @@
         <div class="system-indicators">
             <div id="pollingIndicator" class="pulse-dot" style="opacity: 0;" title="Live Updates Polling"></div>
             <div id="tradingModeBadge" class="mode-badge">VIRTUAL</div>
+            <div id="marketHoursBadge" class="mode-badge" title="NSE trading hours 09:15-15:20 IST, Mon-Fri. Outside this window no new trades fire and the AI stops calling Gemini.">MARKET —</div>
             <div id="systemStatusBadge" class="status-badge active">
                 <span class="status-dot"></span>
                 <span id="systemStatusText">ACTIVE</span>
@@ -710,9 +711,9 @@
                             <th>Symbol</th>
                             <th>Action</th>
                             <th>Qty</th>
-                            <th>Avg Price</th>
-                            <th>Target</th>
-                            <th>Stop Loss</th>
+                            <th>Entry Price</th>
+                            <th>Exit Price</th>
+                            <th>Realized P&L</th>
                             <th>Status</th>
                             <th>Timestamp</th>
                         </tr>
@@ -815,13 +816,31 @@
     </footer>
 
     <script>
-        const SYMBOLS_MAP = {
-            "NSE_EQ|INE062A01020": { name: "SBIN", yf: "SBIN.NS", base: "SBIN" },
-            "NSE_EQ|INE154A01025": { name: "ITC", yf: "ITC.NS", base: "ITC" },
-            "NSE_EQ|INE733E01010": { name: "NTPC", yf: "NTPC.NS", base: "NTPC" },
-            "NSE_EQ|INE213A01029": { name: "ONGC", yf: "ONGC.NS", base: "ONGC" },
-            "NSE_EQ|INE522F01014": { name: "COALINDIA", yf: "COALINDIA.NS", base: "COALINDIA" }
-        };
+        // Populated at load time from /api/symbols — never hardcode the watchlist here.
+        // A prior hardcoded copy of this map drifted out of sync with the backend watchlist
+        // and kept showing a stock the backend had already dropped.
+        let SYMBOLS_MAP = {};
+
+        async function loadSymbols() {
+            try {
+                const res = await fetch('/api/symbols');
+                const data = await res.json();
+                SYMBOLS_MAP = {};
+                for (const token in data) {
+                    SYMBOLS_MAP[token] = { name: data[token].name, yf: data[token].yf, base: data[token].name };
+                }
+                populateBacktestDropdown();
+            } catch (err) {
+                console.error("Failed to load symbol map:", err);
+            }
+        }
+
+        function populateBacktestDropdown() {
+            const select = document.getElementById('bt-symbol');
+            if (!select) return;
+            const names = Object.values(SYMBOLS_MAP).sort((a, b) => a.name.localeCompare(b.name));
+            select.innerHTML = names.map(s => `<option value="${s.yf}">${s.name}</option>`).join('');
+        }
 
         let currentPrices = {};
         const oldPrices = {};
@@ -916,6 +935,17 @@
             }
 
             modeBadge.innerText = status.trading_mode || "VIRTUAL";
+
+            const marketBadge = document.getElementById('marketHoursBadge');
+            if (status.market_hours_open) {
+                marketBadge.innerText = "MARKET OPEN";
+                marketBadge.style.color = "var(--success)";
+                marketBadge.style.borderColor = "var(--success)";
+            } else {
+                marketBadge.innerText = "MARKET CLOSED";
+                marketBadge.style.color = "var(--text-secondary)";
+                marketBadge.style.borderColor = "var(--card-border)";
+            }
         }
 
         function updateMetrics(status) {
@@ -960,16 +990,16 @@
 
                 // Get AI sentiment gates (indexed by base name in Python state, e.g. "RELIANCE")
                 const rawGate = (status.gates && status.gates[info.base]) || "ALLOW_ALL";
-                let gateBadge = `<span class="badge badge-neutral">ALLOW_ALL</span>`;
-                
+                let gateBadge = `<span class="badge badge-gate-allow">AI: BUY + SELL ALLOWED</span>`;
+
                 if (rawGate === "ALLOW_BUY") {
-                    gateBadge = `<span class="badge badge-gate-allow">AI: BUY GATED</span>`;
+                    gateBadge = `<span class="badge badge-gate-allow">AI: BUY ALLOWED</span>`;
                 } else if (rawGate === "ALLOW_SELL") {
-                    gateBadge = `<span class="badge badge-gate-allow">AI: SELL GATED</span>`;
+                    gateBadge = `<span class="badge badge-gate-allow">AI: SELL ALLOWED</span>`;
                 } else if (rawGate === "VETO") {
-                    gateBadge = `<span class="badge badge-gate-veto">AI: VETO (LOCK)</span>`;
+                    gateBadge = `<span class="badge badge-gate-veto">AI: NO TRADE (VETO)</span>`;
                 } else if (rawGate === "FLATTEN") {
-                    gateBadge = `<span class="badge badge-gate-flatten">AI: FLATTEN</span>`;
+                    gateBadge = `<span class="badge badge-gate-flatten">AI: CLOSE POSITION NOW</span>`;
                 }
 
                 html += `
@@ -1108,6 +1138,10 @@
                         statusBadge = `<span class="badge badge-sell">${trade.status}</span>`;
                     }
 
+                    const pnlVal = trade.pnl;
+                    const pnlCellClass = pnlVal == null ? '' : (pnlVal > 0 ? 'text-bold pnl-positive' : (pnlVal < 0 ? 'text-bold pnl-negative' : 'text-bold'));
+                    const pnlText = pnlVal == null ? '-' : `₹${pnlVal >= 0 ? '+' : ''}${pnlVal.toFixed(2)}`;
+
                     html += `
                         <tr>
                             <td class="text-bold" style="color: var(--text-secondary);">${trade.id}</td>
@@ -1115,8 +1149,8 @@
                             <td><span class="badge ${actionClass}">${action}</span></td>
                             <td>${trade.quantity}</td>
                             <td>₹${trade.price.toFixed(2)}</td>
-                            <td>₹${trade.target ? trade.target.toFixed(2) : '-'}</td>
-                            <td>₹${trade.stop_loss ? trade.stop_loss.toFixed(2) : '-'}</td>
+                            <td>${trade.exit_price != null ? '₹' + trade.exit_price.toFixed(2) : '-'}</td>
+                            <td class="${pnlCellClass}">${pnlText}</td>
                             <td>${statusBadge}</td>
                             <td>${timeStr}</td>
                         </tr>
@@ -1214,9 +1248,11 @@
         }
 
         // Poll every 1.5 seconds
-        setInterval(pollData, 1500);
-        // Initial run
-        pollData();
+        (async () => {
+            await loadSymbols();
+            pollData();
+            setInterval(pollData, 1500);
+        })();
     </script>
 </body>
 </html>

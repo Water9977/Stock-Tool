@@ -24,16 +24,11 @@ except ImportError:
     sys.exit(1)
 
 from src.technicals import TechnicalEngine
+from src.config import Config
 
-
-# Mapping from Yahoo Finance ticker to Upstox instrument key
-SYMBOL_MAP = {
-    "SBIN.NS":      "NSE_EQ|INE062A01020",
-    "ITC.NS":       "NSE_EQ|INE154A01025",
-    "NTPC.NS":      "NSE_EQ|INE733E01010",
-    "ONGC.NS":      "NSE_EQ|INE213A01029",
-    "COALINDIA.NS": "NSE_EQ|INE522F01014",
-}
+# Mapping from Yahoo Finance ticker to Upstox instrument key — single source of truth,
+# shared with the live watchlist so this module can't drift out of sync with it.
+SYMBOL_MAP = Config.SYMBOL_MAP
 
 
 class BacktestResult:

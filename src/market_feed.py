@@ -21,24 +21,58 @@ from src.config import Config
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Instrument keys (Upstox format)
+#  Instrument keys (Upstox format) — derived from Config.SYMBOL_MAP so this module
+#  can never drift out of sync with the watchlist (a prior hardcoded copy here caused
+#  a stale-symbol bug where the frontend kept showing a delisted-from-watchlist stock).
 # ─────────────────────────────────────────────────────────────────────────────
-INSTRUMENT_KEYS = [
-    "NSE_EQ|INE028A01039",  # BANKBARODA (~Rs.275, replaced SBIN which hit Rs.1037)
-    "NSE_EQ|INE154A01025",  # ITC
-    "NSE_EQ|INE733E01010",  # NTPC
-    "NSE_EQ|INE213A01029",  # ONGC
-    "NSE_EQ|INE522F01014",  # COALINDIA
-]
+INSTRUMENT_KEYS = list(Config.SYMBOL_MAP.values())
 
-# Base LTP seeds — realistic NSE prices June 2026. Used only until first REST/WS tick arrives.
-_BASE_PRICES = {
-    "NSE_EQ|INE028A01039": 275.0,   # BANKBARODA
-    "NSE_EQ|INE154A01025": 291.0,   # ITC
-    "NSE_EQ|INE733E01010": 356.0,   # NTPC
-    "NSE_EQ|INE213A01029": 235.0,   # ONGC
-    "NSE_EQ|INE522F01014": 440.0,   # COALINDIA
+# Snapshot LTPs (Jun 2026) used only as the seed value until the first real REST/WS tick
+# arrives, and as the starting point for the VIRTUAL random-walk simulator. Any instrument
+# key not present here (e.g. a symbol added to Config.SYMBOL_MAP later) falls back to 200.0.
+_BASE_PRICE_SNAPSHOT = {
+    "NSE_EQ|INE075A01022": 170.41,   # WIPRO
+    "NSE_EQ|INE081A01020": 187.09,   # TATASTEEL
+    "NSE_EQ|INE213A01029": 235.55,   # ONGC
+    "NSE_EQ|INE752E01010": 287.25,   # POWERGRID
+    "NSE_EQ|INE154A01025": 290.10,   # ITC
+    "NSE_EQ|INE029A01011": 303.20,   # BPCL
+    "NSE_EQ|INE155A01022": 349.10,   # TATAMOTORS
+    "NSE_EQ|INE733E01010": 359.00,   # NTPC
+    "NSE_EQ|INE237A01036": 396.85,   # KOTAKBANK
+    "NSE_EQ|INE522F01014": 435.65,   # COALINDIA
+    "NSE_EQ|INE628A01036": 567.85,   # UPL
+    "NSE_EQ|INE795G01014": 568.50,   # HDFCLIFE
+    "NSE_EQ|INE040A01034": 800.50,   # HDFCBANK
+    "NSE_EQ|INE038A01020": 941.05,   # HINDALCO
+    "NSE_EQ|INE095A01012": 943.95,   # INDUSINDBK
+    "NSE_EQ|INE009A01021": 996.70,   # INFY
+    "NSE_EQ|INE296A01032": 1023.00,  # BAJFINANCE
+    "NSE_EQ|INE062A01020": 1037.70,  # SBIN
+    "NSE_EQ|INE721A01047": 1050.70,  # SHRIRAMFIN
+    "NSE_EQ|INE860A01027": 1054.50,  # HCLTECH
+    "NSE_EQ|INE192A01025": 1084.00,  # TATACONSUM
+    "NSE_EQ|INE019A01038": 1216.20,  # JSWSTEEL
+    "NSE_EQ|INE002A01018": 1309.50,  # RELIANCE
+    "NSE_EQ|INE089A01031": 1337.20,  # DRREDDY
+    "NSE_EQ|INE669C01036": 1362.10,  # TECHM
+    "NSE_EQ|INE238A01034": 1374.50,  # AXISBANK
+    "NSE_EQ|INE090A01021": 1381.80,  # ICICIBANK
+    "NSE_EQ|INE239A01024": 1443.40,  # NESTLEIND
+    "NSE_EQ|INE059A01026": 1447.90,  # CIPLA
+    "NSE_EQ|INE123W01016": 1772.70,  # SBILIFE
+    "NSE_EQ|INE918I01026": 1779.80,  # BAJAJFINSV
+    "NSE_EQ|INE742F01042": 1859.00,  # ADANIPORTS
+    "NSE_EQ|INE044A01036": 1863.00,  # SUNPHARMA
+    "NSE_EQ|INE397D01024": 1874.60,  # BHARTIARTL
+    "NSE_EQ|INE467B01029": 2032.90,  # TCS
+    "NSE_EQ|INE030A01027": 2164.00,  # HINDUNILVR
+    "NSE_EQ|INE021A01026": 2711.20,  # ASIANPAINT
+    "NSE_EQ|INE423A01024": 3106.00,  # ADANIENT
+    "NSE_EQ|INE101A01026": 3133.50,  # M&M
+    "NSE_EQ|INE047A01021": 3142.60,  # GRASIM
 }
+_BASE_PRICES = {key: _BASE_PRICE_SNAPSHOT.get(key, 200.0) for key in INSTRUMENT_KEYS}
 
 
 def _load_proto_module():

@@ -39,6 +39,19 @@ def _init_db_sync():
         cursor.execute("ALTER TABLE daily_stats ADD COLUMN consecutive_losses INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
         pass  # Column already exists
+
+    # Migration for pre-existing DBs created before exit_price/pnl columns existed.
+    # Previously closing a trade overwrote the `price` column with the exit price,
+    # destroying the entry price. exit_price/pnl now hold that data instead.
+    for ddl in (
+        "ALTER TABLE orders ADD COLUMN exit_price REAL",
+        "ALTER TABLE orders ADD COLUMN pnl REAL",
+    ):
+        try:
+            cursor.execute(ddl)
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
     conn.commit()
     conn.close()
 

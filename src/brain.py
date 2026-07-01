@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import os
 import random
 import yfinance as yf
@@ -7,6 +8,19 @@ import aiohttp
 import feedparser
 import json
 from src.config import Config
+
+# Dedicated pool for Gemini calls. A plain asyncio.wait_for around asyncio.to_thread cannot
+# actually interrupt a blocking call already running in a worker thread (asyncio cancellation
+# is cooperative and synchronous code has no cancellation points) — the installed google-genai
+# SDK also has no working HTTP-level timeout (see its _api_client.py: `timeout=None` is
+# hardcoded pending a TODO). concurrent.futures.Future.result(timeout=...) is used instead,
+# since it genuinely stops waiting after the deadline regardless of whether the submitted work
+# has finished; the orphaned call keeps running in the pool but its result is simply discarded.
+_gemini_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="gemini")
+
+def _call_with_hard_timeout(func, timeout, *args, **kwargs):
+    future = _gemini_executor.submit(func, *args, **kwargs)
+    return future.result(timeout=timeout)
 
 class GeminiRateLimiter:
     """
@@ -35,14 +49,16 @@ class GeminiRateLimiter:
 
             self.call_timestamps.append(now)
 
-async def call_gemini_with_retry(client, rate_limiter, prompt, schema, max_retries=3):
+async def call_gemini_with_retry(client, rate_limiter, prompt, schema, max_retries=3, call_timeout=180.0):
     backoff_base = 2
     attempt = 0
     while attempt < max_retries:
         try:
             await rate_limiter.acquire()
             response = await asyncio.to_thread(
+                _call_with_hard_timeout,
                 client.models.generate_content,
+                call_timeout,
                 model='gemini-3.1-flash-lite',
                 contents=prompt,
                 config={
@@ -51,6 +67,13 @@ async def call_gemini_with_retry(client, rate_limiter, prompt, schema, max_retri
                 }
             )
             return json.loads(response.text)
+        except concurrent.futures.TimeoutError:
+            print(f"[GEMINI ERROR] Attempt {attempt+1} timed out after {call_timeout}s (orphaned call keeps running in background, result discarded).")
+            if attempt < max_retries - 1:
+                sleep_time = (backoff_base ** attempt) + random.uniform(0, 1)
+                print(f"[GEMINI] Retrying in {sleep_time:.2f} seconds...")
+                await asyncio.sleep(sleep_time)
+            attempt += 1
         except Exception as e:
             error_msg = str(e).lower()
             print(f"[GEMINI ERROR] Attempt {attempt+1} failed: {e}")
@@ -58,7 +81,7 @@ async def call_gemini_with_retry(client, rate_limiter, prompt, schema, max_retri
                 print("[GEMINI RATE LIMIT] Quota hit. Sleeping for 65 seconds...")
                 await asyncio.sleep(65.0)
                 continue
-                
+
             if attempt < max_retries - 1:
                 sleep_time = (backoff_base ** attempt) + random.uniform(0, 1)
                 print(f"[GEMINI] Retrying in {sleep_time:.2f} seconds...")
@@ -229,14 +252,22 @@ class BrainEngine:
             return
             
         from src.orders import get_available_balance, _open_positions
-        from src.config import Config
-            
+
         while True:
-            # 1. Fetch Raw News
-            news_data = {}
-            for sym in self.watch_symbols:
-                news_data[sym] = await asyncio.to_thread(self.news_agent.fetch_yf_news, sym)
-                
+            # Skip AI evaluation entirely outside NSE trading hours — no point burning
+            # Gemini quota overnight/weekends when no trades can execute anyway.
+            if not Config.is_market_hours():
+                self.gates = {s.replace(".NS", ""): "VETO" for s in self.watch_symbols}
+                await asyncio.sleep(60.0)
+                continue
+
+            # 1. Fetch Raw News (in parallel — sequential fetch across 40 symbols was pushing
+            # a single Cold Path cycle past a minute before Gemini was even called)
+            news_results = await asyncio.gather(
+                *(asyncio.to_thread(self.news_agent.fetch_yf_news, sym) for sym in self.watch_symbols)
+            )
+            news_data = dict(zip(self.watch_symbols, news_results))
+
             # 2. Detect Fraud (Deterministic)
             fraud_data = self.fraud_agent.run(news_data)
 

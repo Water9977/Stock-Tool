@@ -31,25 +31,6 @@ class OrderRequest(BaseModel):
     target_pct: float = Field(default=0.02, description="Target Profit Percentage (e.g. 0.02 for 2%)")
     sl_pct: float = Field(default=0.01, description="Stop Loss Percentage (e.g. 0.01 for 1%)")
 
-def is_market_hours() -> bool:
-    """
-    Returns True if current Indian Standard Time (IST) is between 09:15 and 15:20 on weekdays.
-    If running in VIRTUAL mode, we allow 24/7 simulation for testing purposes.
-    """
-    if Config.TRADING_MODE == "VIRTUAL":
-        return True
-        
-    ist = pytz.timezone("Asia/Kolkata")
-    now = datetime.now(ist)
-    
-    # Check if weekend (5 = Saturday, 6 = Sunday)
-    if now.weekday() >= 5:
-        return False
-        
-    market_start = time(9, 15)
-    market_end = time(15, 20)
-    return market_start <= now.time() <= market_end
-
 async def automated_execution_loop(feed: MarketFeed, technicals: TechnicalEngine, brain: BrainEngine):
     """The core decision engine connecting Hot, Warm, and Cold paths."""
     print("Starting Automated Execution Loop...")
@@ -75,7 +56,7 @@ async def automated_execution_loop(feed: MarketFeed, technicals: TechnicalEngine
             continue
             
         # Check Indian Standard Time (IST) market hours guard
-        if not is_market_hours():
+        if not Config.is_market_hours():
             continue
             
         for yf_symbol in brain.watch_symbols:
@@ -238,7 +219,17 @@ async def status_api():
         "max_capital_per_trade": Config.MAX_CAPITAL_PER_TRADE,
         "gates": brain.gates if brain else {},
         "signals": technicals.signals if technicals else {},
-        "global_headlines": brain.global_headlines if brain else []
+        "global_headlines": brain.global_headlines if brain else [],
+        "market_hours_open": Config.is_market_hours()
+    }
+
+@app.get("/api/symbols")
+async def symbols_api():
+    """Returns watchlist symbol metadata (instrument key -> display name) so the frontend
+    never has to hardcode the watchlist independently of Config.SYMBOL_MAP."""
+    return {
+        instrument_key: {"name": yf_symbol.replace(".NS", ""), "yf": yf_symbol}
+        for yf_symbol, instrument_key in Config.SYMBOL_MAP.items()
     }
 
 @app.post("/execute")

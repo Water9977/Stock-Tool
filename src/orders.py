@@ -202,7 +202,10 @@ def _process_closed_orders_sync(closed_orders):
     try:
         for order_id, executed_exit_price, trade_pnl, trigger_reason, symbol, entry_price, charges, mode in closed_orders:
             status = "VIRTUAL_CLOSED" if mode == "VIRTUAL" else "LIVE_CLOSED"
-            cursor.execute("UPDATE orders SET status = ?, price = ? WHERE id = ?", (status, executed_exit_price, order_id))
+            cursor.execute(
+                "UPDATE orders SET status = ?, exit_price = ?, pnl = ? WHERE id = ?",
+                (status, executed_exit_price, trade_pnl, order_id)
+            )
             update_realized_pnl(trade_pnl, cursor=cursor)
             print(f"[{trigger_reason}] Closed {mode} trade {order_id} for {symbol}. Net P&L: Rs.{trade_pnl:+.2f}")
         risk_engine.persist_loss_counter(cursor)
@@ -294,7 +297,10 @@ def _flatten_positions_db_sync(updates):
     try:
         for order_id, executed_exit_price, pnl, mode in updates:
             status = "VIRTUAL_CLOSED" if mode == "VIRTUAL" else "LIVE_CLOSED"
-            cursor.execute("UPDATE orders SET status = ?, price = ? WHERE id = ?", (status, executed_exit_price, order_id))
+            cursor.execute(
+                "UPDATE orders SET status = ?, exit_price = ?, pnl = ? WHERE id = ?",
+                (status, executed_exit_price, pnl, order_id)
+            )
             update_realized_pnl(pnl, cursor=cursor)
         risk_engine.persist_loss_counter(cursor)
         conn.commit()
