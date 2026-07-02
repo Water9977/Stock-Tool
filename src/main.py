@@ -82,7 +82,7 @@ async def automated_execution_loop(feed: MarketFeed, technicals: TechnicalEngine
                 
             # Match Signal with Gate
             if signal in ["BUY", "SELL"]:
-                if last_trade.get(upstox_symbol, 0) > asyncio.get_running_loop().time() - 300: # 5 mins cooldown
+                if last_trade.get(upstox_symbol, 0) > asyncio.get_running_loop().time() - 120: # 2 min cooldown per symbol
                     continue
                 
                 # Get current price to calculate dynamic quantity
@@ -99,16 +99,23 @@ async def automated_execution_loop(feed: MarketFeed, technicals: TechnicalEngine
                 if qty <= 0:
                     print(f"[EXECUTION] Signal {signal} for {upstox_symbol} bypassed: insufficient balance (Price: Rs.{current_price:.2f}, Available: Rs.{available_balance:.2f})")
                     continue
-                
+
+                ai_reason = brain.reasoning.get(base_symbol, "").strip()
+                trade_reasoning = (
+                    f"Technical: {signal} signal on RSI/MACD. "
+                    f"AI: {ai_reason if ai_reason else 'no commentary this cycle'}. "
+                    f"Qty {qty} sized to Rs.{trade_capital:,.0f} of Rs.{Config.MAX_CAPITAL_PER_TRADE:,.0f} per-trade cap at Rs.{current_price:.2f}/share."
+                )
+
                 if signal == "BUY" and gate in ["ALLOW_BUY", "ALLOW_ALL"]:
                     last_trade[upstox_symbol] = asyncio.get_running_loop().time()
                     print(f"[EXECUTION] Automated BUY triggered for {upstox_symbol} (Signal: {signal}, Gate: {gate}, Qty: {qty})")
-                    await place_order(upstox_symbol, qty, "BUY", state["access_token"])
-                    
+                    await place_order(upstox_symbol, qty, "BUY", state["access_token"], reasoning=trade_reasoning)
+
                 elif signal == "SELL" and gate in ["ALLOW_SELL", "ALLOW_ALL"]:
                     last_trade[upstox_symbol] = asyncio.get_running_loop().time()
                     print(f"[EXECUTION] Automated SELL triggered for {upstox_symbol} (Signal: {signal}, Gate: {gate}, Qty: {qty})")
-                    await place_order(upstox_symbol, qty, "SELL", state["access_token"])
+                    await place_order(upstox_symbol, qty, "SELL", state["access_token"], reasoning=trade_reasoning)
 async def shutdown_scheduler():
     """
     Monitors the operational time. 
@@ -208,15 +215,22 @@ async def status_api():
     """Returns the current trading status, realized metrics, signals, and macro headlines."""
     brain = state.get("brain")
     technicals = state.get("technicals")
-    
+
     today_pnl = await get_realized_pnl_async()
-    
+
+    from src.orders import get_available_balance
+    from src.db import get_starting_capital
+    wallet_balance = await asyncio.to_thread(get_available_balance)
+    starting_capital = await asyncio.to_thread(get_starting_capital)
+
     return {
         "status": "active" if state["trading_allowed"] else "suspended",
         "trading_mode": Config.TRADING_MODE,
         "today_realized_pnl": today_pnl,
         "max_allowed_loss": Config.MAX_DAILY_LOSS,
         "max_capital_per_trade": Config.MAX_CAPITAL_PER_TRADE,
+        "starting_capital": starting_capital,
+        "wallet_balance": wallet_balance,
         "gates": brain.gates if brain else {},
         "signals": technicals.signals if technicals else {},
         "global_headlines": brain.global_headlines if brain else [],

@@ -178,16 +178,22 @@ class CommitteeAgent:
             'required': ['macro_mood', 'macro_reasoning', 'gates']
         }
         
-        prompt = "You are an elite, multi-agent AI trading committee (Sentiment Analyst, Macro Economist, Risk Manager). "
-        prompt += "Your job is to evaluate the provided inputs and decide the final action gate for each symbol. Output JSON as requested.\n\n"
+        prompt = "You are an elite, multi-agent AI trading committee (Sentiment Analyst, Macro Economist, Risk Manager) "
+        prompt += "for a virtual paper-trading account with a large capital base. Your job is to evaluate the provided "
+        prompt += "inputs and decide the final action gate for each symbol. Output JSON as requested.\n\n"
         prompt += f"AVAILABLE CASH FOR NEW TRADES: Rs. {financial_data.get('available_balance', 0):.2f}\n"
         prompt += f"CURRENT OPEN POSITIONS: {json.dumps(financial_data.get('open_positions', []))}\n"
         prompt += f"GLOBAL MACRO HEADLINES:\n{chr(10).join(global_headlines) if global_headlines else 'None'}\n\n"
-        
+
         prompt += "Guidelines for Action Gate:\n"
+        prompt += "- This is virtual money used to test a real trading strategy. Default to ALLOW_ALL unless you see a\n"
+        prompt += "  concrete reason not to trade this symbol — do not withhold participation just because sentiment\n"
+        prompt += "  is neutral or unremarkable. A quiet news day is not itself a reason to veto.\n"
+        prompt += "- Reserve VETO for a real red flag on this specific symbol: fraud detected, clearly bearish news,\n"
+        prompt += "  or an extreme/contradictory technical reading. Do not VETO purely for low available cash unless\n"
+        prompt += "  it is genuinely near zero.\n"
         prompt += "- If sentiment is extremely negative, a crash is imminent, or FRAUD DETECTED is true, output FLATTEN.\n"
-        prompt += "- If available cash is very low and sentiment is weak, output VETO to preserve capital.\n"
-        prompt += "- Consider the last 10 RSI and MACD values for trend direction. If RSI is > 70 (overbought) -> favor ALLOW_SELL or VETO. If RSI < 30 (oversold) -> favor ALLOW_BUY.\n\n"
+        prompt += "- Consider the last 10 RSI and MACD values for trend direction. If RSI is > 70 (overbought) -> favor ALLOW_SELL. If RSI < 30 (oversold) -> favor ALLOW_BUY.\n\n"
 
         prompt += "PER-SYMBOL DATA:\n"
         for sym, headlines in news_data.items():
@@ -203,6 +209,7 @@ class CommitteeAgent:
             
         result = await call_gemini_with_retry(self.client, self.rate_limiter, prompt, schema)
         gates = {}
+        reasoning = {}
         if result:
             print(f"[COMMITTEE] Macro Mood: {result.get('macro_mood')} | Reasoning: {result.get('macro_reasoning')}")
             if 'gates' in result:
@@ -210,18 +217,20 @@ class CommitteeAgent:
                     ticker = item['ticker']
                     gate = item.get('gate', 'VETO').upper()
                     gates[ticker] = gate
+                    reasoning[ticker] = item.get('reasoning', '')
                     print(f"[COMMITTEE] {ticker} -> Gate: {gate} | Conviction: {item.get('conviction_score')} | Sentiment: {item.get('sentiment')} | Reason: {item.get('reasoning')}")
         else:
             print("[COMMITTEE] LLM call failed, falling back to VETO.")
             for sym in news_data.keys():
                 gates[sym.replace(".NS", "")] = "VETO"
-                
-        return gates
+
+        return gates, reasoning
 
 class BrainEngine:
     def __init__(self):
         self.watch_symbols = list(Config.SYMBOL_MAP.keys())
         self.gates = {s.replace(".NS", ""): "VETO" for s in self.watch_symbols}
+        self.reasoning = {s.replace(".NS", ""): "" for s in self.watch_symbols}
         self.global_headlines = []
         
         # Initialize Gemini Client and pipeline
@@ -290,18 +299,21 @@ class BrainEngine:
             }
 
             # 5. Single-Shot AI Evaluation
-            new_gates = await self.committee_agent.run(
+            new_gates, new_reasoning = await self.committee_agent.run(
                 self.global_headlines,
                 news_data,
                 fraud_data,
                 tech_data,
                 fin_data
             )
-            
+
             # Update instance state safely
             for base_sym, gate in new_gates.items():
                 if base_sym in self.gates:
                     self.gates[base_sym] = gate
+            for base_sym, reason in new_reasoning.items():
+                if base_sym in self.gates:
+                    self.reasoning[base_sym] = reason
 
             await asyncio.sleep(300.0) # Refresh every 5 minutes
 

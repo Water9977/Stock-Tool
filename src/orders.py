@@ -126,19 +126,19 @@ async def execute_live_order(symbol: str, quantity: int, transaction_type: str, 
             return {"status": "FAILED", "reason": str(res)}
         return {"status": "SUBMITTED", "order_id": res["data"]["order_id"]}
 
-def _insert_order_sync(order_id, symbol, quantity, price, target, stop_loss, order_type, transaction_type, status):
+def _insert_order_sync(order_id, symbol, quantity, price, target, stop_loss, order_type, transaction_type, status, reasoning=""):
     conn = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute(
-            "INSERT INTO orders (id, symbol, quantity, price, target, stop_loss, order_type, transaction_type, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (order_id, symbol, quantity, price, target, stop_loss, order_type, transaction_type, status)
+            "INSERT INTO orders (id, symbol, quantity, price, target, stop_loss, order_type, transaction_type, status, reasoning) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (order_id, symbol, quantity, price, target, stop_loss, order_type, transaction_type, status, reasoning)
         )
         conn.commit()
     finally:
         conn.close()
 
-async def place_order(symbol: str, quantity: int, transaction_type: str, access_token: str, target_pct: float = 0.02, sl_pct: float = 0.01) -> dict:
+async def place_order(symbol: str, quantity: int, transaction_type: str, access_token: str, target_pct: float = 0.02, sl_pct: float = 0.01, reasoning: str = "") -> dict:
     transaction_type = transaction_type.upper()
     
     risk_check = await asyncio.to_thread(risk_engine.evaluate_pre_trade)
@@ -169,8 +169,8 @@ async def place_order(symbol: str, quantity: int, transaction_type: str, access_
 
     if Config.TRADING_MODE in ["VIRTUAL", "PAPER"]:
         order_id = f"V-{uuid.uuid4().hex[:8].upper()}"
-        await asyncio.to_thread(_insert_order_sync, order_id, symbol, quantity, executed_price, target_price, stop_loss_price, "MARKET", transaction_type, "VIRTUAL_OPEN")
-        
+        await asyncio.to_thread(_insert_order_sync, order_id, symbol, quantity, executed_price, target_price, stop_loss_price, "MARKET", transaction_type, "VIRTUAL_OPEN", reasoning)
+
         _open_positions[order_id] = {
             "symbol": symbol, "quantity": quantity, "entry_price": executed_price,
             "target": target_price, "stop_loss": stop_loss_price, "transaction_type": transaction_type, "mode": "VIRTUAL"
@@ -184,7 +184,7 @@ async def place_order(symbol: str, quantity: int, transaction_type: str, access_
             return res
             
         order_id = res["order_id"]
-        await asyncio.to_thread(_insert_order_sync, order_id, symbol, quantity, current_price, target_price, stop_loss_price, "MARKET", transaction_type, "LIVE_SUBMITTED")
+        await asyncio.to_thread(_insert_order_sync, order_id, symbol, quantity, current_price, target_price, stop_loss_price, "MARKET", transaction_type, "LIVE_SUBMITTED", reasoning)
         
         _open_positions[order_id] = {
             "symbol": symbol, "quantity": quantity, "entry_price": current_price,

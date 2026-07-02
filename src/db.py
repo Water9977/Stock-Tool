@@ -46,6 +46,7 @@ def _init_db_sync():
     for ddl in (
         "ALTER TABLE orders ADD COLUMN exit_price REAL",
         "ALTER TABLE orders ADD COLUMN pnl REAL",
+        "ALTER TABLE orders ADD COLUMN reasoning TEXT",
     ):
         try:
             cursor.execute(ddl)

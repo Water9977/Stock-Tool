@@ -40,12 +40,16 @@ class TechnicalEngine:
                 current_macd = inds["macd"][-1]
                 macd_line = current_macd.macd if current_macd else None
                 macd_signal = current_macd.signal if current_macd else None
+                macd_bullish = macd_line is not None and macd_signal is not None and macd_line > macd_signal
+                macd_bearish = macd_line is not None and macd_signal is not None and macd_line < macd_signal
 
-                # Confirmation condition: RSI < 35 (Oversold) AND MACD Line > MACD Signal -> Buy Signal
-                # RSI > 65 (Overbought) AND MACD Line < MACD Signal -> Sell Signal
-                if current_rsi < 35.0 and macd_line is not None and macd_signal is not None and macd_line > macd_signal:
+                # Either condition alone is enough to trigger — requiring both RSI extreme AND
+                # MACD confirmation simultaneously was so rare across a trading day it produced
+                # almost no signals at all. RSI<40/>60 with a same-direction MACD tiebreak on the
+                # non-extreme side keeps this from firing on pure noise.
+                if current_rsi < 40.0 or (macd_bullish and current_rsi < 50.0):
                     self.signals[symbol] = "BUY"
-                elif current_rsi > 65.0 and macd_line is not None and macd_signal is not None and macd_line < macd_signal:
+                elif current_rsi > 60.0 or (macd_bearish and current_rsi > 50.0):
                     self.signals[symbol] = "SELL"
                 else:
                     self.signals[symbol] = "NEUTRAL"

@@ -596,13 +596,21 @@
         <!-- Top Metrics Row -->
         <section class="metrics-row">
             <div class="glass-card">
+                <span class="metric-label">Wallet Balance</span>
+                <span id="walletValue" class="metric-value">₹0.00</span>
+                <div class="metric-sub">
+                    <span id="walletSub">Available cash — Virtual Account</span>
+                </div>
+            </div>
+
+            <div class="glass-card">
                 <span class="metric-label">Today's Realized P&L</span>
                 <span id="pnlValue" class="metric-value pnl-neutral">₹0.00</span>
                 <div class="metric-sub">
                     <span>Virtual Account</span>
                 </div>
             </div>
-            
+
             <div class="glass-card">
                 <span class="metric-label">Max Daily Loss</span>
                 <span id="maxLossValue" class="metric-value">₹0.00</span>
@@ -610,7 +618,7 @@
                     <span>Hard Limit suspension gate</span>
                 </div>
             </div>
-            
+
             <div class="glass-card">
                 <span class="metric-label">Max Capital Per Trade</span>
                 <span id="maxCapitalValue" class="metric-value">₹0.00</span>
@@ -689,11 +697,12 @@
                             <th>Target</th>
                             <th>Stop Loss</th>
                             <th>Unrealized P&L</th>
+                            <th>Why</th>
                         </tr>
                     </thead>
                     <tbody id="openPositionsBody">
                         <tr>
-                            <td colspan="9" class="empty-state">
+                            <td colspan="10" class="empty-state">
                                 <span class="empty-icon">💼</span>
                                 <span>No open virtual positions currently active.</span>
                             </td>
@@ -701,7 +710,7 @@
                     </tbody>
                 </table>
             </div>
-            
+
             <!-- Trade History Panel -->
             <div id="trade-history" class="tab-panel">
                 <table class="positions-table">
@@ -716,11 +725,12 @@
                             <th>Realized P&L</th>
                             <th>Status</th>
                             <th>Timestamp</th>
+                            <th>Why</th>
                         </tr>
                     </thead>
                     <tbody id="tradeHistoryBody">
                         <tr>
-                            <td colspan="9" class="empty-state">
+                            <td colspan="10" class="empty-state">
                                 <span class="empty-icon">📜</span>
                                 <span>No historical trades logged in today's database session.</span>
                             </td>
@@ -952,6 +962,8 @@
             const pnlVal = status.today_realized_pnl || 0.0;
             const maxLossVal = status.max_allowed_loss || 0.0;
             const maxCapVal = status.max_capital_per_trade || 0.0;
+            const walletVal = status.wallet_balance != null ? status.wallet_balance : 0.0;
+            const startingCap = status.starting_capital || 0.0;
 
             const pnlEl = document.getElementById('pnlValue');
             pnlEl.innerText = formatINR(pnlVal);
@@ -963,6 +975,11 @@
             } else {
                 pnlEl.className = 'metric-value pnl-neutral';
             }
+
+            const walletEl = document.getElementById('walletValue');
+            walletEl.innerText = formatINR(walletVal);
+            walletEl.className = walletVal >= startingCap ? 'metric-value pnl-positive' : 'metric-value pnl-negative';
+            document.getElementById('walletSub').innerText = `Available cash of ₹${startingCap.toLocaleString('en-IN')} starting balance`;
 
             document.getElementById('maxLossValue').innerText = formatINR(maxLossVal);
             document.getElementById('maxCapitalValue').innerText = formatINR(maxCapVal);
@@ -1091,6 +1108,7 @@
                     const pnlClass = unrealized > 0 ? 'pnl-positive' : (unrealized < 0 ? 'pnl-negative' : '');
                     const actionClass = action === "BUY" ? 'badge-buy' : 'badge-sell';
                     const info = SYMBOLS_MAP[pos.symbol] || { name: pos.symbol };
+                    const why = pos.reasoning || 'No reasoning recorded.';
 
                     html += `
                         <tr>
@@ -1103,6 +1121,7 @@
                             <td style="color: var(--success);">₹${pos.target.toFixed(2)}</td>
                             <td style="color: var(--danger);">₹${pos.stop_loss.toFixed(2)}</td>
                             <td class="text-bold ${pnlClass}">₹${unrealized.toFixed(2)}</td>
+                            <td style="max-width: 260px; font-size: 0.78rem; color: var(--text-secondary);" title="${why.replace(/"/g, '&quot;')}">${why}</td>
                         </tr>
                     `;
                 });
@@ -1114,7 +1133,7 @@
             if (histList.length === 0) {
                 historyBody.innerHTML = `
                     <tr>
-                        <td colspan="9" class="empty-state">
+                        <td colspan="10" class="empty-state">
                             <span class="empty-icon">📜</span>
                             <span>No historical trades logged in today's database session.</span>
                         </td>
@@ -1141,6 +1160,7 @@
                     const pnlVal = trade.pnl;
                     const pnlCellClass = pnlVal == null ? '' : (pnlVal > 0 ? 'text-bold pnl-positive' : (pnlVal < 0 ? 'text-bold pnl-negative' : 'text-bold'));
                     const pnlText = pnlVal == null ? '-' : `₹${pnlVal >= 0 ? '+' : ''}${pnlVal.toFixed(2)}`;
+                    const why = trade.reasoning || 'No reasoning recorded.';
 
                     html += `
                         <tr>
@@ -1153,6 +1173,7 @@
                             <td class="${pnlCellClass}">${pnlText}</td>
                             <td>${statusBadge}</td>
                             <td>${timeStr}</td>
+                            <td style="max-width: 260px; font-size: 0.78rem; color: var(--text-secondary);" title="${why.replace(/"/g, '&quot;')}">${why}</td>
                         </tr>
                     `;
                 });

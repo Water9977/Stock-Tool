@@ -13,10 +13,10 @@ class Config:
     MOBILE_NUMBER = os.getenv("UPSTOX_MOBILE_NUMBER")
     PIN = os.getenv("UPSTOX_PIN")
     TOTP_SECRET = os.getenv("UPSTOX_TOTP_SECRET")
-    STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", 5000.0))
-    MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", 2500.0))
+    STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", 300000.0))
+    MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", 200000.0))
     # Per-trade cap kept below total capital so account can hold multiple concurrent positions.
-    MAX_CAPITAL_PER_TRADE = float(os.getenv("MAX_CAPITAL_PER_TRADE", 3500.0))
+    MAX_CAPITAL_PER_TRADE = float(os.getenv("MAX_CAPITAL_PER_TRADE", 150000.0))
 
     TRADING_MODE = os.getenv("TRADING_MODE", "VIRTUAL").upper()
 
