@@ -15,9 +15,22 @@ import asyncio
 import json
 import random
 import ssl
+import time
 import httpx
 import websockets
 from src.config import Config
+
+# How long without a successful price update before the feed is considered stale.
+# REST poll runs every 1s, so 10s survives transient hiccups/retries but still catches
+# a real outage (e.g. an expired/invalid Upstox token) within a few seconds.
+FEED_STALE_AFTER_SECONDS = 10.0
+
+# After recovering from a stale spell, the first fresh tick can be a large gap-jump from
+# whatever price the feed was frozen at (real market moves don't pause just because our
+# feed did). Require this many seconds of continuous freshness before trading resumes, so
+# a stale-then-reconnect moment can't itself look like a genuine RSI/MACD signal or trip a
+# stop-loss/target against a price the account never actually had a chance to react to.
+FEED_RECOVERY_GRACE_SECONDS = 8.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -113,6 +126,7 @@ class MarketFeed:
             cls._instance.tick_queues = []
             cls._instance._access_token = None
             cls._instance.last_tick_time = None
+            cls._instance._feed_recovered_at = None
             cls._instance.candles = {}  # symbol -> {period, open, high, low, close}
         return cls._instance
 
@@ -129,8 +143,8 @@ class MarketFeed:
     async def _process_tick(self, symbol: str, price: float):
         """Aggregates 1-second ticks into 5-minute OHLC candles and broadcasts the closed candle."""
         self.price_cache[symbol] = price
-        
-        import time
+        self.last_tick_time = time.time()
+
         current_period = int(time.time() // Config.CANDLE_PERIOD_SECONDS)
         
         if symbol not in self.candles:
@@ -389,6 +403,26 @@ class MarketFeed:
     def get_price(self, symbol: str) -> float:
         """Returns the current Last Traded Price (LTP) from the in-memory cache."""
         return self.price_cache.get(symbol, 0.0)
+
+    def is_feed_healthy(self) -> bool:
+        """
+        False if prices are stale (e.g. every REST poll is failing on an expired/invalid
+        token) or if a stale spell just ended and we're still inside the post-recovery
+        grace window. Callers should treat False as "do not open, close, or evaluate any
+        position right now" — VIRTUAL mode is always healthy (self-generated, can't go stale).
+        """
+        if Config.TRADING_MODE == "VIRTUAL":
+            return True
+
+        now = time.time()
+        if self.last_tick_time is None or (now - self.last_tick_time) > FEED_STALE_AFTER_SECONDS:
+            self._feed_recovered_at = None
+            return False
+
+        if self._feed_recovered_at is None:
+            self._feed_recovered_at = now
+
+        return (now - self._feed_recovered_at) >= FEED_RECOVERY_GRACE_SECONDS
 
     def stop(self):
         """Gracefully stops the feed background worker."""

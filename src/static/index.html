@@ -585,6 +585,7 @@
             <div id="pollingIndicator" class="pulse-dot" style="opacity: 0;" title="Live Updates Polling"></div>
             <div id="tradingModeBadge" class="mode-badge">VIRTUAL</div>
             <div id="marketHoursBadge" class="mode-badge" title="NSE trading hours 09:15-15:20 IST, Mon-Fri. Outside this window no new trades fire and the AI stops calling Gemini.">MARKET —</div>
+            <div id="feedHealthBadge" class="mode-badge" title="Whether real price ticks are currently arriving. When stale (e.g. an expired Upstox token), no new trades open, no positions close, and nothing evaluates against the frozen price.">FEED —</div>
             <div id="systemStatusBadge" class="status-badge active">
                 <span class="status-dot"></span>
                 <span id="systemStatusText">ACTIVE</span>
@@ -955,6 +956,21 @@
                 marketBadge.innerText = "MARKET CLOSED";
                 marketBadge.style.color = "var(--text-secondary)";
                 marketBadge.style.borderColor = "var(--card-border)";
+            }
+
+            const feedBadge = document.getElementById('feedHealthBadge');
+            if (status.trading_mode === "VIRTUAL") {
+                feedBadge.innerText = "FEED SIMULATED";
+                feedBadge.style.color = "var(--text-secondary)";
+                feedBadge.style.borderColor = "var(--card-border)";
+            } else if (status.feed_healthy) {
+                feedBadge.innerText = "FEED LIVE";
+                feedBadge.style.color = "var(--success)";
+                feedBadge.style.borderColor = "var(--success)";
+            } else {
+                feedBadge.innerText = "FEED STALE — TRADING PAUSED";
+                feedBadge.style.color = "var(--danger)";
+                feedBadge.style.borderColor = "var(--danger)";
             }
         }
 

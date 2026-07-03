@@ -58,7 +58,13 @@ async def automated_execution_loop(feed: MarketFeed, technicals: TechnicalEngine
         # Check Indian Standard Time (IST) market hours guard
         if not Config.is_market_hours():
             continue
-            
+
+        # Do not open, close, or flatten anything on a stale feed (e.g. every REST poll
+        # failing on an expired token) — a frozen price can look like a false RSI/MACD
+        # extreme, and the first real price after reconnecting is a gap-jump, not a signal.
+        if not feed.is_feed_healthy():
+            continue
+
         for yf_symbol in brain.watch_symbols:
             base_symbol = yf_symbol.replace(".NS", "")
             
@@ -234,7 +240,8 @@ async def status_api():
         "gates": brain.gates if brain else {},
         "signals": technicals.signals if technicals else {},
         "global_headlines": brain.global_headlines if brain else [],
-        "market_hours_open": Config.is_market_hours()
+        "market_hours_open": Config.is_market_hours(),
+        "feed_healthy": state["feed"].is_feed_healthy() if state.get("feed") else False
     }
 
 @app.get("/api/symbols")

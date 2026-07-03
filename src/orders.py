@@ -221,7 +221,15 @@ async def monitor_open_positions(access_token: str = None):
     
     while True:
         await asyncio.sleep(0.1)
-        
+
+        # Don't evaluate SL/TP against a stale or just-reconnected feed. A price frozen
+        # during an outage (e.g. an expired token) can drift far from reality before the
+        # feed recovers, and the first fresh tick afterwards is a gap-jump that would
+        # otherwise force-close every open position at a price the account never actually
+        # had a chance to react to.
+        if not feed.is_feed_healthy():
+            continue
+
         closed_orders = []
         for order_id, pos in list(_open_positions.items()):
             current_price = feed.get_price(pos["symbol"])
