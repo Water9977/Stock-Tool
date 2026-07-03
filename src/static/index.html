@@ -850,7 +850,7 @@
             const select = document.getElementById('bt-symbol');
             if (!select) return;
             const names = Object.values(SYMBOLS_MAP).sort((a, b) => a.name.localeCompare(b.name));
-            select.innerHTML = names.map(s => `<option value="${s.yf}">${s.name}</option>`).join('');
+            select.innerHTML = names.map(s => `<option value="${escapeHtml(s.yf)}">${escapeHtml(s.name)}</option>`).join('');
         }
 
         let currentPrices = {};
@@ -862,6 +862,17 @@
                 currency: 'INR',
                 maximumFractionDigits: 2
             }).format(value);
+        }
+
+        // Escapes text before it's interpolated into an innerHTML template string. Required
+        // for anything sourced externally (RSS headlines, AI reasoning text that itself reads
+        // those headlines) — without this, a crafted headline could inject arbitrary HTML/JS
+        // into every browser viewing this dashboard.
+        function escapeHtml(str) {
+            if (str == null) return '';
+            const div = document.createElement('div');
+            div.textContent = String(str);
+            return div.innerHTML;
         }
 
         function flashPriceCell(cellId, direction) {
@@ -1076,7 +1087,7 @@
             headlines.forEach(title => {
                 html += `
                     <div class="news-item">
-                        <span class="news-title">${title}</span>
+                        <span class="news-title">${escapeHtml(title)}</span>
                         <div class="news-meta">
                             <span class="news-source">Livemint</span>
                             <span>•</span>
@@ -1137,7 +1148,7 @@
                             <td style="color: var(--success);">₹${pos.target.toFixed(2)}</td>
                             <td style="color: var(--danger);">₹${pos.stop_loss.toFixed(2)}</td>
                             <td class="text-bold ${pnlClass}">₹${unrealized.toFixed(2)}</td>
-                            <td style="max-width: 260px; font-size: 0.78rem; color: var(--text-secondary);" title="${why.replace(/"/g, '&quot;')}">${why}</td>
+                            <td style="max-width: 260px; font-size: 0.78rem; color: var(--text-secondary);" title="${escapeHtml(why)}">${escapeHtml(why)}</td>
                         </tr>
                     `;
                 });
@@ -1189,7 +1200,7 @@
                             <td class="${pnlCellClass}">${pnlText}</td>
                             <td>${statusBadge}</td>
                             <td>${timeStr}</td>
-                            <td style="max-width: 260px; font-size: 0.78rem; color: var(--text-secondary);" title="${why.replace(/"/g, '&quot;')}">${why}</td>
+                            <td style="max-width: 260px; font-size: 0.78rem; color: var(--text-secondary);" title="${escapeHtml(why)}">${escapeHtml(why)}</td>
                         </tr>
                     `;
                 });
@@ -1268,7 +1279,7 @@
                             <td>₹${t.entry_price.toFixed(2)}</td>
                             <td>₹${t.exit_price.toFixed(2)}</td>
                             <td class="text-bold" style="color: ${t.pnl >= 0 ? 'var(--success)' : 'var(--danger)'}">₹${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(2)}</td>
-                            <td style="color: var(--text-secondary); font-size: 0.8rem;">${t.reason}</td>
+                            <td style="color: var(--text-secondary); font-size: 0.8rem;">${escapeHtml(t.reason)}</td>
                         </tr>
                     `;
                 });

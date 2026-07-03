@@ -32,15 +32,18 @@ async def test_pipeline():
     await feed.start()
     await asyncio.sleep(1.0) # Wait for simulator to tick
     
-    # Check simulated stock price
-    bankbaroda_price = feed.get_price("NSE_EQ|INE028A01039")
-    print(f"[OK] Simulated price for BANKBARODA (LTP): Rs. {bankbaroda_price}")
-    assert bankbaroda_price > 0, "Price should be greater than 0"
+    # Check simulated stock price. ITC.NS is used here because it's part of the current
+    # Config.SYMBOL_MAP watchlist (BANKBARODA, formerly used here, was dropped from the
+    # watchlist a while back and this test kept silently failing at the price assert since
+    # get_price() falls back to 0.0 for any symbol not in the feed's price_cache).
+    itc_price = feed.get_price("NSE_EQ|INE154A01025")
+    print(f"[OK] Simulated price for ITC (LTP): Rs. {itc_price}")
+    assert itc_price > 0, "Price should be greater than 0"
 
     # 5. Place a simulated order
-    print("Placing a simulated BUY order for 1 share of BANKBARODA...")
+    print("Placing a simulated BUY order for 1 share of ITC...")
     res = await place_order(
-        symbol="NSE_EQ|INE028A01039",
+        symbol="NSE_EQ|INE154A01025",
         quantity=1,
         transaction_type="BUY",
         access_token=token,

@@ -16,7 +16,7 @@ from src.config import Config
 # hardcoded pending a TODO). concurrent.futures.Future.result(timeout=...) is used instead,
 # since it genuinely stops waiting after the deadline regardless of whether the submitted work
 # has finished; the orphaned call keeps running in the pool but its result is simply discarded.
-_gemini_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="gemini")
+_gemini_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="gemini")
 
 def _call_with_hard_timeout(func, timeout, *args, **kwargs):
     future = _gemini_executor.submit(func, *args, **kwargs)
@@ -49,9 +49,10 @@ class GeminiRateLimiter:
 
             self.call_timestamps.append(now)
 
-async def call_gemini_with_retry(client, rate_limiter, prompt, schema, max_retries=3, call_timeout=180.0):
+async def call_gemini_with_retry(client, rate_limiter, prompt, schema, max_retries=3, call_timeout=180.0, max_quota_waits=3):
     backoff_base = 2
     attempt = 0
+    quota_waits = 0
     while attempt < max_retries:
         try:
             await rate_limiter.acquire()
@@ -78,7 +79,14 @@ async def call_gemini_with_retry(client, rate_limiter, prompt, schema, max_retri
             error_msg = str(e).lower()
             print(f"[GEMINI ERROR] Attempt {attempt+1} failed: {e}")
             if "429" in error_msg or "quota" in error_msg:
-                print("[GEMINI RATE LIMIT] Quota hit. Sleeping for 65 seconds...")
+                quota_waits += 1
+                # This branch previously `continue`d without ever incrementing `attempt`,
+                # so a persistently exhausted quota pinned the Cold Path in this 65s sleep
+                # forever — max_retries never bounded it. max_quota_waits caps it separately.
+                if quota_waits >= max_quota_waits:
+                    print(f"[GEMINI RATE LIMIT] Quota still exhausted after {quota_waits} waits — giving up this cycle.")
+                    return None
+                print(f"[GEMINI RATE LIMIT] Quota hit ({quota_waits}/{max_quota_waits}). Sleeping for 65 seconds...")
                 await asyncio.sleep(65.0)
                 continue
 
@@ -93,6 +101,8 @@ class NewsAgent:
     """
     Fetches raw news headlines from Yahoo Finance without calling LLM.
     """
+    _schema_warning_shown = False
+
     def __init__(self):
         self.last_news_hash = ""
 
@@ -102,7 +112,27 @@ class NewsAgent:
             news_items = stock.news
             if not news_items:
                 return []
-            return [item.get('title', '') for item in news_items[:5]]
+            # yfinance 1.4.x nests the headline under item['content']['title'] — the older
+            # flat item['title'] shape returns None for every article on this version and
+            # silently starves FraudAgent (and the FLATTEN-on-fraud safety switch) of any
+            # text to scan. Try the current shape first, fall back to the old flat shape in
+            # case a future yfinance version reverts, and log loudly if both come up empty
+            # so a schema drift like this is never silent again.
+            titles = []
+            for item in news_items[:5]:
+                title = item.get('content', {}).get('title') if isinstance(item.get('content'), dict) else None
+                if not title:
+                    title = item.get('title')
+                if title:
+                    titles.append(title)
+
+            if news_items and not titles and not NewsAgent._schema_warning_shown:
+                NewsAgent._schema_warning_shown = True
+                print(f"[NewsAgent WARNING] yfinance returned {len(news_items)} articles for {ticker} "
+                      f"but no title could be extracted from either the content.title or title shape. "
+                      f"yfinance's news schema may have changed again — sample item keys: {list(news_items[0].keys())}")
+
+            return titles
         except Exception as e:
             print(f"[NewsAgent ERROR] Failed fetching news for {ticker}: {e}")
             return []
@@ -292,9 +322,10 @@ class BrainEngine:
                     macd_history = [round(m.macd, 4) for m in inds['macd'][-10:] if m is not None and m.macd is not None]
                     tech_data[sym] = {"RSI": rsi_history, "MACD": macd_history}
             
-            # 4. Extract Financial Data
+            # 4. Extract Financial Data — get_available_balance() does synchronous SQLite
+            # reads and must not run directly on the event loop.
             fin_data = {
-                "available_balance": get_available_balance(),
+                "available_balance": await asyncio.to_thread(get_available_balance),
                 "open_positions": list(_open_positions.values())
             }
 

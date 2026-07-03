@@ -170,22 +170,105 @@ class BacktestResult:
                 )
 
 
+async def download_history(yf_symbol: str, interval: str, period: str):
+    """Downloads and normalizes historical OHLCV data from Yahoo Finance."""
+    df = await asyncio.to_thread(
+        lambda: yf.download(yf_symbol, interval=interval, period=period, progress=False, auto_adjust=True)
+    )
+    if not df.empty and isinstance(df.columns, object) and hasattr(df.columns, 'levels'):
+        df.columns = df.columns.droplevel(1)
+    return df
+
+
+async def replay_ticks(df, yf_symbol: str, upstox_symbol: str, verbose: bool = False) -> BacktestResult:
+    """
+    Feeds an already-downloaded OHLCV DataFrame tick-by-tick through TechnicalEngine and
+    replays entries/exits against it. This is the one shared core between the CLI backtester
+    (`run_backtest`, below) and the `/backtest` API endpoint in main.py — those two used to
+    be independent reimplementations of this exact loop that would silently drift apart on
+    the next change to either one.
+
+    Target/Stop are applied as 2% / 1% of entry price (same as live).
+
+    IMPORTANT — this is technicals-only. It does NOT apply the Cold Path AI gate
+    (ALLOW_BUY/ALLOW_SELL/ALLOW_ALL/VETO/FLATTEN) that the live system also requires before
+    acting on a technical signal, because a meaningful historical replay of Gemini's
+    sentiment/fraud analysis against the news cycle at each past 5-minute bar isn't
+    practical to reconstruct. Treat these results as a technical-signal-only upper bound on
+    what the live system could have done — the live system will trade less often and
+    differently, since the AI gate can additionally veto or flatten any of these signals.
+    """
+    technicals = TechnicalEngine()
+    tick_queue = asyncio.Queue()
+    result = BacktestResult(yf_symbol)
+
+    engine_task = asyncio.create_task(technicals.run(tick_queue))
+
+    TARGET_PCT = 0.02   # 2% target
+    SL_PCT = 0.01       # 1% stop loss
+
+    try:
+        for ts, row in df.iterrows():
+            close_price = float(row["Close"])
+            timestamp = ts.strftime("%Y-%m-%d %H:%M") if hasattr(ts, 'strftime') else str(ts)
+
+            await tick_queue.put({"symbol": upstox_symbol, "price": close_price})
+            await asyncio.sleep(0)   # yield to let indicator engine process
+
+            signal = technicals.get_signal(upstox_symbol)
+
+            # Check open position first (exit conditions)
+            if result.open_trade is not None:
+                entry = result.open_trade["entry_price"]
+                side = result.open_trade["side"]
+
+                if side == "BUY":
+                    target = entry * (1 + TARGET_PCT)
+                    sl = entry * (1 - SL_PCT)
+                    if close_price >= target:
+                        result.close_position(close_price, timestamp, "Target Hit")
+                    elif close_price <= sl:
+                        result.close_position(close_price, timestamp, "Stop Loss")
+                else:  # SELL (short)
+                    target = entry * (1 - TARGET_PCT)
+                    sl = entry * (1 + SL_PCT)
+                    if close_price <= target:
+                        result.close_position(close_price, timestamp, "Target Hit")
+                    elif close_price >= sl:
+                        result.close_position(close_price, timestamp, "Stop Loss")
+
+            # Enter new position if no open trade and signal exists
+            if result.open_trade is None and signal in ("BUY", "SELL"):
+                result.open_position(close_price, signal, timestamp)
+                if verbose:
+                    rsi_val = technicals.indicators[upstox_symbol]['rsi'][-1] if upstox_symbol in technicals.indicators else 0
+                    print(f"  [ENTER {signal:4s}] @ Rs.{close_price:.2f} | RSI: {rsi_val:.1f} | {timestamp}")
+
+        # Force-close any remaining position at last price
+        if result.open_trade is not None and not df.empty:
+            last_price = float(df["Close"].iloc[-1])
+            result.close_position(last_price, "end-of-data", "EOD Force Close")
+            if verbose:
+                print(f"  [FORCE CLOSE] @ Rs.{last_price:.2f}")
+    finally:
+        engine_task.cancel()
+
+    return result
+
+
 async def run_backtest(yf_symbol: str = "SBIN.NS", interval: str = "5m", period: str = "5d"):
     """
     Downloads historical data from Yahoo Finance and replays it tick-by-tick
-    through the TechnicalEngine to generate backtest signals.
-
-    Target/Stop are applied as 2% / 1% of entry price (same as live).
+    through the TechnicalEngine to generate backtest signals (CLI entry point).
     """
     upstox_symbol = SYMBOL_MAP.get(yf_symbol, f"NSE_EQ|{yf_symbol}")
 
     print(f"\nBacktest starting: {yf_symbol} | Interval: {interval} | Period: {period}")
+    print("(technical-signal-only — does not apply the live system's AI gate; see replay_ticks() docstring)")
     print("Downloading historical data from Yahoo Finance...")
 
     try:
-        df = await asyncio.to_thread(
-            lambda: yf.download(yf_symbol, interval=interval, period=period, progress=False, auto_adjust=True)
-        )
+        df = await download_history(yf_symbol, interval, period)
     except Exception as e:
         print(f"ERROR: Failed to download data from Yahoo Finance: {e}")
         return
@@ -194,70 +277,8 @@ async def run_backtest(yf_symbol: str = "SBIN.NS", interval: str = "5m", period:
         print("ERROR: No data returned. Try a different period or interval.")
         return
 
-    # Flatten multi-level columns if present (yfinance sometimes returns them)
-    if isinstance(df.columns, object) and hasattr(df.columns, 'levels'):
-        df.columns = df.columns.droplevel(1)
-
     print(f"Downloaded {len(df)} candles. Starting replay...\n")
-
-    technicals = TechnicalEngine()
-    tick_queue = asyncio.Queue()
-    result = BacktestResult(yf_symbol)
-
-    # Start warm path indicator engine
-    engine_task = asyncio.create_task(technicals.run(tick_queue))
-
-    TARGET_PCT = 0.02   # 2% target
-    SL_PCT = 0.01       # 1% stop loss
-
-    for ts, row in df.iterrows():
-        close_price = float(row["Close"])
-        timestamp = ts.strftime("%Y-%m-%d %H:%M") if hasattr(ts, 'strftime') else str(ts)
-
-        # Feed tick into the Warm Path
-        await tick_queue.put({"symbol": upstox_symbol, "price": close_price})
-        await asyncio.sleep(0)   # yield to let indicator engine process
-
-        signal = technicals.get_signal(upstox_symbol)
-
-        # Check open position first (exit conditions)
-        if result.open_trade is not None:
-            entry = result.open_trade["entry_price"]
-            side = result.open_trade["side"]
-
-            if side == "BUY":
-                target = entry * (1 + TARGET_PCT)
-                sl = entry * (1 - SL_PCT)
-                if close_price >= target:
-                    result.close_position(close_price, timestamp, "Target Hit")
-                elif close_price <= sl:
-                    result.close_position(close_price, timestamp, "Stop Loss")
-            else:  # SELL (short)
-                target = entry * (1 - TARGET_PCT)
-                sl = entry * (1 + SL_PCT)
-                if close_price <= target:
-                    result.close_position(close_price, timestamp, "Target Hit")
-                elif close_price >= sl:
-                    result.close_position(close_price, timestamp, "Stop Loss")
-
-        # Enter new position if no open trade and signal exists
-        if result.open_trade is None and signal == "BUY":
-            result.open_position(close_price, "BUY", timestamp)
-            rsi_val = technicals.indicators[upstox_symbol]['rsi'][-1] if upstox_symbol in technicals.indicators else 0
-            print(f"  [ENTER BUY ] @ Rs.{close_price:.2f} | RSI: {rsi_val:.1f} | {timestamp}")
-
-        elif result.open_trade is None and signal == "SELL":
-            result.open_position(close_price, "SELL", timestamp)
-            rsi_val = technicals.indicators[upstox_symbol]['rsi'][-1] if upstox_symbol in technicals.indicators else 0
-            print(f"  [ENTER SELL] @ Rs.{close_price:.2f} | RSI: {rsi_val:.1f} | {timestamp}")
-
-    # Force-close any remaining position at last price
-    if result.open_trade is not None:
-        last_price = float(df["Close"].iloc[-1])
-        result.close_position(last_price, "end-of-data", "EOD Force Close")
-        print(f"  [FORCE CLOSE] @ Rs.{last_price:.2f}")
-
-    engine_task.cancel()
+    result = await replay_ticks(df, yf_symbol, upstox_symbol, verbose=True)
     result.print_summary()
 
 

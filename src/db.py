@@ -1,9 +1,24 @@
 import sqlite3
 import os
 import asyncio
-from datetime import date
+import pytz
+from datetime import datetime
 
 DATABASE_FILE = os.getenv("DATABASE_PATH", "trading.db")
+IST = pytz.timezone("Asia/Kolkata")
+
+def _ist_today_str() -> str:
+    """
+    Single definition of "today" for every daily_stats lookup. Previously each function used
+    date.today() independently, which follows the server's local/system timezone (UTC on
+    Railway) rather than IST — and more importantly, nothing ever created a new day's row
+    except main.py's one-time startup_event call. On a 24/7 deployment that crosses midnight
+    without a restart, every later "today" lookup found no matching row and silently
+    degraded: update_realized_pnl became a no-op (P&L of trades closed after midnight was
+    lost), get_realized_pnl returned 0.0 (masking the daily-loss circuit breaker), and
+    get_starting_capital fell back to a hardcoded 2000.0 regardless of Config.STARTING_CAPITAL.
+    """
+    return datetime.now(IST).date().isoformat()
 
 def get_connection():
     return sqlite3.connect(DATABASE_FILE, timeout=10)
@@ -60,13 +75,30 @@ def init_db():
     _init_db_sync()
     print("Database tables initialized successfully.")
 
+def _ensure_day_row(cursor, starting_capital: float):
+    """
+    Idempotent insert of today's (IST) daily_stats row if it doesn't already exist. Called at
+    the top of every read/write in this module so a mid-session IST-midnight rollover on a
+    24/7 deployment self-heals on the very next DB access, instead of requiring a restart.
+
+    Each new day starts fresh at `starting_capital` (does not compound yesterday's P&L
+    forward) — this matches how the system already behaves on every container restart today
+    (main.py's startup_event always reseeds from Config.STARTING_CAPITAL). If compounding
+    day-over-day P&L into the next day's starting capital is preferred instead, this is the
+    one place to change it.
+    """
+    cursor.execute(
+        "INSERT INTO daily_stats (date, starting_capital) VALUES (?, ?) ON CONFLICT(date) DO NOTHING",
+        (_ist_today_str(), starting_capital)
+    )
+
 def _start_day_stats_sync(starting_capital: float):
-    today_str = date.today().isoformat()
+    today_str = _ist_today_str()
     conn = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute("""
-            INSERT INTO daily_stats (date, starting_capital) 
+            INSERT INTO daily_stats (date, starting_capital)
             VALUES (?, ?)
             ON CONFLICT(date) DO UPDATE SET starting_capital = excluded.starting_capital
         """, (today_str, starting_capital))
@@ -74,22 +106,28 @@ def _start_day_stats_sync(starting_capital: float):
     finally:
         conn.close()
 
-def start_day_stats(starting_capital: float = 2000.0):
-    _start_day_stats_sync(starting_capital)
+def start_day_stats(starting_capital: float = None):
+    from src.config import Config
+    _start_day_stats_sync(starting_capital if starting_capital is not None else Config.STARTING_CAPITAL)
 
-async def start_day_stats_async(starting_capital: float = 2000.0):
-    await asyncio.to_thread(_start_day_stats_sync, starting_capital)
+async def start_day_stats_async(starting_capital: float = None):
+    from src.config import Config
+    await asyncio.to_thread(_start_day_stats_sync, starting_capital if starting_capital is not None else Config.STARTING_CAPITAL)
 
 def get_realized_pnl(cursor=None) -> float:
-    today_str = date.today().isoformat()
+    from src.config import Config
+    today_str = _ist_today_str()
     if cursor is not None:
+        _ensure_day_row(cursor, Config.STARTING_CAPITAL)
         cursor.execute("SELECT realized_pnl FROM daily_stats WHERE date = ?", (today_str,))
         row = cursor.fetchone()
         return row[0] if row else 0.0
-        
+
     conn = get_connection()
     cursor_loc = conn.cursor()
     try:
+        _ensure_day_row(cursor_loc, Config.STARTING_CAPITAL)
+        conn.commit()
         cursor_loc.execute("SELECT realized_pnl FROM daily_stats WHERE date = ?", (today_str,))
         row = cursor_loc.fetchone()
         return row[0] if row else 0.0
@@ -100,17 +138,23 @@ async def get_realized_pnl_async() -> float:
     return await asyncio.to_thread(get_realized_pnl)
 
 def update_realized_pnl(amount: float, cursor=None):
-    today_str = date.today().isoformat()
+    from src.config import Config
+    today_str = _ist_today_str()
     if cursor is not None:
+        # UPSERT, not a plain UPDATE: a plain UPDATE against a date with no existing row is
+        # a silent no-op — that was the exact bug that lost every trade's realized P&L closed
+        # after an IST-midnight rollover on a long-running deployment.
+        _ensure_day_row(cursor, Config.STARTING_CAPITAL)
         cursor.execute(
             "UPDATE daily_stats SET realized_pnl = realized_pnl + ? WHERE date = ?",
             (amount, today_str)
         )
         return
-        
+
     conn = get_connection()
     cursor_loc = conn.cursor()
     try:
+        _ensure_day_row(cursor_loc, Config.STARTING_CAPITAL)
         cursor_loc.execute(
             "UPDATE daily_stats SET realized_pnl = realized_pnl + ? WHERE date = ?",
             (amount, today_str)
@@ -120,10 +164,13 @@ def update_realized_pnl(amount: float, cursor=None):
         conn.close()
 
 def get_consecutive_losses() -> int:
-    today_str = date.today().isoformat()
+    from src.config import Config
+    today_str = _ist_today_str()
     conn = get_connection()
     cursor = conn.cursor()
     try:
+        _ensure_day_row(cursor, Config.STARTING_CAPITAL)
+        conn.commit()
         cursor.execute("SELECT consecutive_losses FROM daily_stats WHERE date = ?", (today_str,))
         row = cursor.fetchone()
         return int(row[0]) if row and row[0] is not None else 0
@@ -131,27 +178,35 @@ def get_consecutive_losses() -> int:
         conn.close()
 
 def set_consecutive_losses(count: int, cursor=None):
-    today_str = date.today().isoformat()
+    from src.config import Config
+    today_str = _ist_today_str()
     if cursor is not None:
+        _ensure_day_row(cursor, Config.STARTING_CAPITAL)
         cursor.execute("UPDATE daily_stats SET consecutive_losses = ? WHERE date = ?", (count, today_str))
         return
 
     conn = get_connection()
     cursor_loc = conn.cursor()
     try:
+        _ensure_day_row(cursor_loc, Config.STARTING_CAPITAL)
         cursor_loc.execute("UPDATE daily_stats SET consecutive_losses = ? WHERE date = ?", (count, today_str))
         conn.commit()
     finally:
         conn.close()
 
 def get_starting_capital() -> float:
-    today_str = date.today().isoformat()
+    from src.config import Config
+    today_str = _ist_today_str()
     conn = get_connection()
     cursor = conn.cursor()
     try:
+        _ensure_day_row(cursor, Config.STARTING_CAPITAL)
+        conn.commit()
         cursor.execute("SELECT starting_capital FROM daily_stats WHERE date = ?", (today_str,))
         row = cursor.fetchone()
-        return row[0] if row else 2000.0
+        # Fall back to the configured value, not a hardcoded literal that has drifted out of
+        # sync with the account's actual configured capital for a long time now.
+        return row[0] if row else Config.STARTING_CAPITAL
     finally:
         conn.close()
 

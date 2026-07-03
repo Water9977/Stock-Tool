@@ -13,6 +13,21 @@ class Config:
     MOBILE_NUMBER = os.getenv("UPSTOX_MOBILE_NUMBER")
     PIN = os.getenv("UPSTOX_PIN")
     TOTP_SECRET = os.getenv("UPSTOX_TOTP_SECRET")
+
+    # Shared secret required (via X-API-Key header) to call mutating endpoints (/execute,
+    # /admin/reset-simulation). If unset, those endpoints refuse all requests rather than
+    # silently allowing unauthenticated order placement / DB wipes on a public URL.
+    API_KEY = os.getenv("API_KEY")
+
+    # Upstox mandates order placement/modification/cancellation requests originate from a
+    # registered static IP (error UDAPI1154 otherwise) — cloud hosts like Railway rotate
+    # outbound IPs by default. Set this to an HTTP(S) proxy URL from a static-IP provider
+    # (e.g. QuotaGuard Static, a fixed-IP VPS) and register that proxy's IP in the Upstox
+    # developer console. Left unset, order calls go out on Railway's normal rotating IP,
+    # which WILL be rejected in LIVE mode once real orders are attempted — this is provider
+    # account setup this codebase cannot provision on its own; None here is a valid no-op
+    # (httpx.AsyncClient(proxy=None) behaves as if no proxy were configured at all).
+    UPSTOX_HTTP_PROXY = os.getenv("UPSTOX_HTTP_PROXY")
     STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", 300000.0))
     MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", 200000.0))
     # Per-trade cap kept below total capital so account can hold multiple concurrent positions.

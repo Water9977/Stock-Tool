@@ -143,7 +143,20 @@ class MarketFeed:
     async def _process_tick(self, symbol: str, price: float):
         """Aggregates 1-second ticks into 5-minute OHLC candles and broadcasts the closed candle."""
         self.price_cache[symbol] = price
-        self.last_tick_time = time.time()
+
+        now = time.time()
+        # The single place that stamps the start of the post-recovery grace window — the
+        # first tick to arrive after a stale spell (or at startup). is_feed_healthy() used to
+        # set this itself as a side effect of being called, and since both
+        # automated_execution_loop and monitor_open_positions call it concurrently (at
+        # different frequencies), a "getter" mutating shared state from two callers is
+        # fragile even though it happened to work under Python's single-threaded event loop.
+        # Ingestion is the one place a tick's arrival is unambiguous, so the mutation lives
+        # here now and is_feed_healthy() is a pure read.
+        was_stale = self.last_tick_time is None or (now - self.last_tick_time) > FEED_STALE_AFTER_SECONDS
+        if was_stale:
+            self._feed_recovered_at = now
+        self.last_tick_time = now
 
         current_period = int(time.time() // Config.CANDLE_PERIOD_SECONDS)
         
@@ -406,21 +419,25 @@ class MarketFeed:
 
     def is_feed_healthy(self) -> bool:
         """
-        False if prices are stale (e.g. every REST poll is failing on an expired/invalid
-        token) or if a stale spell just ended and we're still inside the post-recovery
-        grace window. Callers should treat False as "do not open, close, or evaluate any
-        position right now" — VIRTUAL mode is always healthy (self-generated, can't go stale).
+        Pure read — computes health purely from timestamps already stamped by _process_tick,
+        with no side effects. False if prices are stale (e.g. every REST poll is failing on
+        an expired/invalid token) or if a stale spell just ended and we're still inside the
+        post-recovery grace window. Callers should treat False as "do not open, close, or
+        evaluate any position right now" — VIRTUAL mode is always healthy (self-generated,
+        can't go stale). Safe to call from any number of concurrent tasks.
         """
         if Config.TRADING_MODE == "VIRTUAL":
             return True
 
         now = time.time()
         if self.last_tick_time is None or (now - self.last_tick_time) > FEED_STALE_AFTER_SECONDS:
-            self._feed_recovered_at = None
             return False
 
         if self._feed_recovered_at is None:
-            self._feed_recovered_at = now
+            # Shouldn't happen in practice (_process_tick always stamps this on the first
+            # fresh tick), but treat "we don't know when recovery started" as unhealthy
+            # rather than assuming it's safe.
+            return False
 
         return (now - self._feed_recovered_at) >= FEED_RECOVERY_GRACE_SECONDS
 

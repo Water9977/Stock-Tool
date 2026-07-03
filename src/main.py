@@ -1,8 +1,9 @@
 import asyncio
 import os
 import pytz
+from contextlib import asynccontextmanager
 from datetime import datetime, time
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from src.config import Config
@@ -13,7 +14,17 @@ from src.orders import place_order, monitor_open_positions, sync_open_positions,
 from src.technicals import TechnicalEngine
 from src.brain import BrainEngine
 
-app = FastAPI(title="Stock Tool Execution Engine", description="Minimalistic, low-latency automated trading bridge for Upstox")
+async def require_api_key(x_api_key: str | None = Header(default=None)):
+    """
+    Guards every mutating endpoint (order placement, DB reset). Fails closed: if API_KEY
+    isn't configured, the endpoint refuses ALL requests rather than silently accepting
+    unauthenticated orders/wipes on a public URL — this app is designed for public cloud
+    deployment (Railway) with no other access control in front of it.
+    """
+    if not Config.API_KEY:
+        raise HTTPException(status_code=503, detail="This endpoint is disabled: set the API_KEY environment variable to enable it.")
+    if x_api_key != Config.API_KEY:
+        raise HTTPException(status_code=401, detail="Missing or invalid X-API-Key header.")
 
 # Cache to store runtime session token and engines
 state = {
@@ -59,28 +70,38 @@ async def automated_execution_loop(feed: MarketFeed, technicals: TechnicalEngine
         if not Config.is_market_hours():
             continue
 
-        # Do not open, close, or flatten anything on a stale feed (e.g. every REST poll
-        # failing on an expired token) — a frozen price can look like a false RSI/MACD
-        # extreme, and the first real price after reconnecting is a gap-jump, not a signal.
-        if not feed.is_feed_healthy():
-            continue
+        feed_healthy = feed.is_feed_healthy()
 
         for yf_symbol in brain.watch_symbols:
             base_symbol = yf_symbol.replace(".NS", "")
-            
+
             # Find the corresponding Upstox symbol from Config.SYMBOL_MAP
             upstox_symbol = Config.SYMBOL_MAP.get(yf_symbol)
             if not upstox_symbol:
                 continue
-                
+
             # 1. Check AI Gate (Cold Path)
             gate = brain.gates.get(base_symbol, "VETO")
-            
-            # If the AI gate triggers FLATTEN, immediately exit all positions for this symbol
+
+            # FLATTEN is an emergency exit (fraud/crash signal from the AI) and deliberately
+            # bypasses the feed-health gate below — it exists specifically to get out fast on
+            # bad news, and blocking it during exactly the kind of chaos that might correlate
+            # with feed instability would defeat its purpose. In LIVE mode this is also safe:
+            # the exit is a MARKET order that fills at whatever the real broker price actually
+            # is, not our local (possibly stale) cache — reconcile_live_order() picks up the
+            # real fill price regardless.
             if gate == "FLATTEN":
+                if not feed_healthy:
+                    print(f"[FLATTEN] Executing emergency exit for {upstox_symbol} despite a stale feed (fraud/crash override).")
                 await flatten_positions_for_symbol(upstox_symbol, state["access_token"])
                 continue
-                
+
+            # Do not open new entries on a stale feed (e.g. every REST poll failing on an
+            # expired token) — a frozen price can look like a false RSI/MACD extreme, and the
+            # first real price after reconnecting is a gap-jump, not a signal.
+            if not feed_healthy:
+                continue
+
             # 2. Check Technical Signal (Warm Path)
             signal = technicals.get_signal(upstox_symbol)
             if signal == "NEUTRAL":
@@ -96,9 +117,11 @@ async def automated_execution_loop(feed: MarketFeed, technicals: TechnicalEngine
                 if not current_price or current_price <= 0:
                     continue
                     
-                # Calculate dynamic quantity based on available balance and trade capital limit
+                # Calculate dynamic quantity based on available balance and trade capital limit.
+                # get_available_balance() does synchronous SQLite reads and must not run
+                # directly on the event loop (this runs once per candidate symbol per second).
                 from src.orders import get_available_balance
-                available_balance = get_available_balance()
+                available_balance = await asyncio.to_thread(get_available_balance)
                 trade_capital = min(Config.MAX_CAPITAL_PER_TRADE, available_balance)
                 qty = int(trade_capital / current_price)
                 
@@ -113,15 +136,21 @@ async def automated_execution_loop(feed: MarketFeed, technicals: TechnicalEngine
                     f"Qty {qty} sized to Rs.{trade_capital:,.0f} of Rs.{Config.MAX_CAPITAL_PER_TRADE:,.0f} per-trade cap at Rs.{current_price:.2f}/share."
                 )
 
+                # Cooldown is only set on an accepted order below — a REJECTED order
+                # (insufficient funds discovered inside place_order, daily-loss breaker,
+                # etc.) would otherwise needlessly block this symbol from retrying for a
+                # full 2 minutes even though no trade actually happened.
                 if signal == "BUY" and gate in ["ALLOW_BUY", "ALLOW_ALL"]:
-                    last_trade[upstox_symbol] = asyncio.get_running_loop().time()
                     print(f"[EXECUTION] Automated BUY triggered for {upstox_symbol} (Signal: {signal}, Gate: {gate}, Qty: {qty})")
-                    await place_order(upstox_symbol, qty, "BUY", state["access_token"], reasoning=trade_reasoning)
+                    res = await place_order(upstox_symbol, qty, "BUY", state["access_token"], reasoning=trade_reasoning)
+                    if res.get("status") in ("FILLED", "SUBMITTED"):
+                        last_trade[upstox_symbol] = asyncio.get_running_loop().time()
 
                 elif signal == "SELL" and gate in ["ALLOW_SELL", "ALLOW_ALL"]:
-                    last_trade[upstox_symbol] = asyncio.get_running_loop().time()
                     print(f"[EXECUTION] Automated SELL triggered for {upstox_symbol} (Signal: {signal}, Gate: {gate}, Qty: {qty})")
-                    await place_order(upstox_symbol, qty, "SELL", state["access_token"], reasoning=trade_reasoning)
+                    res = await place_order(upstox_symbol, qty, "SELL", state["access_token"], reasoning=trade_reasoning)
+                    if res.get("status") in ("FILLED", "SUBMITTED"):
+                        last_trade[upstox_symbol] = asyncio.get_running_loop().time()
 async def shutdown_scheduler():
     """
     Monitors the operational time. 
@@ -159,8 +188,9 @@ async def shutdown_scheduler():
                 
     print("[SYSTEM] Automated trading suspended. Final trade logs are locked on the dashboard.")
 
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # @app.on_event("startup") is deprecated in current FastAPI; this is the replacement.
     # 1. Initialize SQLite Database
     init_db()
 
@@ -181,30 +211,45 @@ async def startup_event():
     except Exception as e:
         print(f"CRITICAL: Failed to authenticate Upstox daily session: {e}")
         state["trading_allowed"] = False
-        return
 
-    # 4. Start WebSocket Market Feed cache
-    feed = MarketFeed()
-    feed.set_access_token(state["access_token"])  # Wire token for LIVE mode
-    await feed.start()
-    state["feed"] = feed
-    
-    # 5. Sync Hot Path Cache for open positions
-    sync_open_positions()
-    
-    # 6. Start Engines
-    technicals = TechnicalEngine()
-    brain = BrainEngine()
-    state["technicals"] = technicals
-    state["brain"] = brain
-    
-    # 7. Start background loops
-    asyncio.create_task(monitor_open_positions(state.get("access_token")))
-        
-    asyncio.create_task(automated_execution_loop(feed, technicals, brain))
-    
-    # 8. Start 5-hour automatic shutdown timer
-    asyncio.create_task(shutdown_scheduler())
+    # A lifespan context manager must yield exactly once — a bare `return` here (as the old
+    # @app.on_event("startup") handler used) would skip the yield entirely and break the
+    # ASGI lifespan protocol. Steps 4-8 only make sense if authentication succeeded above.
+    if state["trading_allowed"]:
+        # 4. Start WebSocket Market Feed cache
+        feed = MarketFeed()
+        feed.set_access_token(state["access_token"])  # Wire token for LIVE mode
+        await feed.start()
+        state["feed"] = feed
+
+        # 5. Sync Hot Path Cache for open positions
+        sync_open_positions()
+
+        # 6. Start Engines
+        technicals = TechnicalEngine()
+        brain = BrainEngine()
+        state["technicals"] = technicals
+        state["brain"] = brain
+
+        # 6b. Pre-warm indicators from historical candles BEFORE any live-tick consumer task
+        # exists, so there's no race writing into the same RSI/MACD objects from two places
+        # at once. This must complete (not just be scheduled) before automated_execution_loop
+        # is created below, since that's what spins up technicals.run(tick_queue).
+        await technicals.seed_from_history(state.get("access_token"))
+
+        # 7. Start background loops
+        asyncio.create_task(monitor_open_positions(state.get("access_token")))
+
+        asyncio.create_task(automated_execution_loop(feed, technicals, brain))
+
+        # 8. Start 5-hour automatic shutdown timer
+        asyncio.create_task(shutdown_scheduler())
+
+    yield
+    # No shutdown-phase cleanup currently — background tasks are daemon-like asyncio tasks
+    # that end when the process exits.
+
+app = FastAPI(title="Stock Tool Execution Engine", description="Minimalistic, low-latency automated trading bridge for Upstox", lifespan=lifespan)
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_dashboard():
@@ -253,7 +298,7 @@ async def symbols_api():
         for yf_symbol, instrument_key in Config.SYMBOL_MAP.items()
     }
 
-@app.post("/execute")
+@app.post("/execute", dependencies=[Depends(require_api_key)])
 async def execute_order(request: OrderRequest):
     """Triggers an order execution via Upstox API or Simulator."""
     if not state["trading_allowed"]:
@@ -277,11 +322,11 @@ def _get_portfolio_sync():
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT * FROM orders WHERE status IN ('VIRTUAL_OPEN', 'LIVE_SUBMITTED')")
+        cursor.execute("SELECT * FROM orders WHERE status IN ('VIRTUAL_OPEN', 'LIVE_OPEN')")
         columns = [column[0] for column in cursor.description]
         open_positions = [dict(zip(columns, row)) for row in cursor.fetchall()]
-        
-        cursor.execute("SELECT * FROM orders WHERE status NOT IN ('VIRTUAL_OPEN', 'LIVE_SUBMITTED') ORDER BY timestamp DESC LIMIT 20")
+
+        cursor.execute("SELECT * FROM orders WHERE status NOT IN ('VIRTUAL_OPEN', 'LIVE_OPEN') ORDER BY timestamp DESC LIMIT 20")
         columns_hist = [column[0] for column in cursor.description]
         history = [dict(zip(columns_hist, row)) for row in cursor.fetchall()]
         
@@ -305,9 +350,11 @@ async def get_latest_prices():
     return feed.price_cache
 
 
-@app.post("/admin/reset-simulation")
+@app.post("/admin/reset-simulation", dependencies=[Depends(require_api_key)])
 async def reset_simulation_endpoint():
     """Wipes all virtual trades and resets simulation."""
+    if Config.TRADING_MODE == "LIVE":
+        raise HTTPException(status_code=403, detail="Refusing to reset simulation in LIVE mode — this would wipe the local DB while real broker positions could still be open and untracked.")
     await asyncio.to_thread(reset_simulation)
     clear_open_positions()
     await start_day_stats_async(Config.STARTING_CAPITAL)
@@ -320,6 +367,10 @@ class BacktestRequest(BaseModel):
     period: str = "5d"
 
 
+_VALID_BACKTEST_INTERVALS = {"1m", "5m", "15m", "1h", "1d"}
+_VALID_BACKTEST_PERIODS = {"1d", "5d", "1mo", "3mo", "6mo", "1y"}
+_backtest_lock = asyncio.Lock()
+
 @app.post("/backtest")
 async def trigger_backtest(req: BacktestRequest):
     """
@@ -327,68 +378,52 @@ async def trigger_backtest(req: BacktestRequest):
     Accepts Yahoo Finance ticker symbols (e.g. 'RELIANCE.NS', 'TCS.NS').
     Supported intervals: 1m, 5m, 15m, 1h, 1d
     Supported periods : 1d, 5d, 1mo, 3mo, 6mo, 1y
-    """
-    from src.backtest import BacktestResult, SYMBOL_MAP
 
+    This endpoint is intentionally left open to the dashboard's own Backtest Lab tab (which
+    has no API-key mechanism of its own), unlike /execute and /admin/reset-simulation. It is
+    read-only against Yahoo Finance and never touches the trading account or DB, so the
+    actual risk here is denial-of-service via unbounded downloads, not fund loss — bounded
+    below via an interval/period allowlist and a single-concurrent-run lock instead.
+    """
     symbol = req.symbol
     interval = req.interval
     period = req.period
 
-    try:
-        import yfinance as yf
-        from src.technicals import TechnicalEngine
+    if interval not in _VALID_BACKTEST_INTERVALS:
+        raise HTTPException(status_code=400, detail=f"Invalid interval '{interval}'. Must be one of: {sorted(_VALID_BACKTEST_INTERVALS)}")
+    if period not in _VALID_BACKTEST_PERIODS:
+        raise HTTPException(status_code=400, detail=f"Invalid period '{period}'. Must be one of: {sorted(_VALID_BACKTEST_PERIODS)}")
+    if _backtest_lock.locked():
+        raise HTTPException(status_code=429, detail="A backtest is already running. Try again shortly.")
 
+    async with _backtest_lock:
+        return await _run_backtest(symbol, interval, period)
+
+
+async def _run_backtest(symbol: str, interval: str, period: str):
+    # Delegates to src/backtest.py's shared download_history()/replay_ticks() — this endpoint
+    # used to reimplement the exact same replay loop independently of the CLI backtester,
+    # which meant the two would silently drift apart on the next change to either one.
+    from src.backtest import download_history, replay_ticks, SYMBOL_MAP
+
+    try:
         upstox_symbol = SYMBOL_MAP.get(symbol, f"NSE_EQ|{symbol.replace('.NS', '')}")
-        df = await asyncio.to_thread(
-            lambda: yf.download(symbol, interval=interval, period=period, progress=False, auto_adjust=True)
-        )
+        df = await download_history(symbol, interval, period)
         if df.empty:
             raise HTTPException(status_code=400, detail="No historical data found for this symbol/period.")
 
-        if hasattr(df.columns, 'levels'):
-            df.columns = df.columns.droplevel(1)
+        result = await replay_ticks(df, symbol, upstox_symbol)
 
-        result = BacktestResult(symbol)
-        technicals = TechnicalEngine()
-        tick_queue = asyncio.Queue()
-        engine_task = asyncio.create_task(technicals.run(tick_queue))
-        TARGET_PCT, SL_PCT = 0.02, 0.01
-
-        for ts, row in df.iterrows():
-            close_price = float(row["Close"])
-            timestamp = ts.strftime("%Y-%m-%d %H:%M") if hasattr(ts, 'strftime') else str(ts)
-            await tick_queue.put({"symbol": upstox_symbol, "price": close_price})
-            await asyncio.sleep(0)
-            signal = technicals.get_signal(upstox_symbol)
-
-            if result.open_trade is not None:
-                entry = result.open_trade["entry_price"]
-                side = result.open_trade["side"]
-                if side == "BUY":
-                    if close_price >= entry * (1 + TARGET_PCT):
-                        result.close_position(close_price, timestamp, "Target Hit")
-                    elif close_price <= entry * (1 - SL_PCT):
-                        result.close_position(close_price, timestamp, "Stop Loss")
-                else:
-                    if close_price <= entry * (1 - TARGET_PCT):
-                        result.close_position(close_price, timestamp, "Target Hit")
-                    elif close_price >= entry * (1 + SL_PCT):
-                        result.close_position(close_price, timestamp, "Stop Loss")
-
-            if result.open_trade is None and signal in ["BUY", "SELL"]:
-                result.open_position(close_price, signal, timestamp)
-
-        if result.open_trade is not None:
-            last_price = float(df["Close"].iloc[-1])
-            result.close_position(last_price, "end", "EOD Force Close")
-
-        engine_task.cancel()
         total = result.wins + result.losses
         win_rate = round(result.wins / total * 100, 1) if total else 0.0
         return {
             "symbol": symbol,
             "interval": interval,
             "period": period,
+            "note": "Technical-signal-only backtest. Does NOT apply the live system's AI gate "
+                    "(ALLOW_BUY/ALLOW_SELL/ALLOW_ALL/VETO/FLATTEN) — treat this as an upper "
+                    "bound on trade frequency; the live system trades less often and differently "
+                    "since the AI gate can additionally veto or flatten any of these signals.",
             "total_trades": total,
             "wins": result.wins,
             "losses": result.losses,
