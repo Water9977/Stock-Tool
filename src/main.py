@@ -361,6 +361,39 @@ async def reset_simulation_endpoint():
     return {"status": "reset", "starting_capital": Config.STARTING_CAPITAL}
 
 
+class SetCapitalRequest(BaseModel):
+    amount: float = Field(..., gt=0, description="New value for TODAY's starting_capital row.")
+
+@app.post("/admin/set-starting-capital", dependencies=[Depends(require_api_key)])
+async def set_starting_capital_endpoint(req: SetCapitalRequest):
+    """
+    Directly corrects today's starting_capital without touching realized_pnl, open
+    positions, or trade history. Exists for exactly the case this was first needed for:
+    daily_stats compounds forward from the previous day's ending balance now, but a day's
+    row that was already created before that fix landed can't retroactively benefit from
+    it — this lets that one row be corrected by hand instead of wiping real trade history
+    via /admin/reset-simulation just to fix an accounting figure.
+    """
+    def _set(cursor):
+        from src.db import _ist_today_str, _ensure_day_row
+        _ensure_day_row(cursor, req.amount)
+        cursor.execute("UPDATE daily_stats SET starting_capital = ? WHERE date = ?", (req.amount, _ist_today_str()))
+
+    def _run():
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            _set(cursor)
+            conn.commit()
+        finally:
+            conn.close()
+
+    await asyncio.to_thread(_run)
+    from src.orders import get_available_balance
+    new_balance = await asyncio.to_thread(get_available_balance)
+    return {"status": "updated", "starting_capital": req.amount, "wallet_balance": new_balance}
+
+
 class BacktestRequest(BaseModel):
     symbol: str = "SBIN.NS"
     interval: str = "5m"
