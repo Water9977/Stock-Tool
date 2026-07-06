@@ -9,6 +9,12 @@ import feedparser
 import json
 from src.config import Config
 
+# Watchlist symbols per Gemini committee call. Concurrent batches of this size keep per-call
+# latency close to what's empirically proven to work (~40 symbols took 2-3 minutes) instead of
+# one call covering the whole (now 200-symbol) watchlist taking many minutes and risking the
+# hard-timeout below. See BrainEngine.run() for how batches are gathered concurrently.
+COMMITTEE_BATCH_SIZE = 40
+
 # Dedicated pool for Gemini calls. A plain asyncio.wait_for around asyncio.to_thread cannot
 # actually interrupt a blocking call already running in a worker thread (asyncio cancellation
 # is cooperative and synchronous code has no cancellation points) — the installed google-genai
@@ -16,7 +22,9 @@ from src.config import Config
 # hardcoded pending a TODO). concurrent.futures.Future.result(timeout=...) is used instead,
 # since it genuinely stops waiting after the deadline regardless of whether the submitted work
 # has finished; the orphaned call keeps running in the pool but its result is simply discarded.
-_gemini_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="gemini")
+# max_workers sized for a full watchlist's worth of concurrent committee batches (200 symbols /
+# COMMITTEE_BATCH_SIZE = 5 batches) without any of them queueing behind another.
+_gemini_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="gemini")
 
 def _call_with_hard_timeout(func, timeout, *args, **kwargs):
     future = _gemini_executor.submit(func, *args, **kwargs)
@@ -328,11 +336,17 @@ class BrainEngine:
                 await asyncio.sleep(60.0)
                 continue
 
-            # 1. Fetch Raw News (in parallel — sequential fetch across 40 symbols was pushing
-            # a single Cold Path cycle past a minute before Gemini was even called)
-            news_results = await asyncio.gather(
-                *(asyncio.to_thread(self.news_agent.fetch_yf_news, sym) for sym in self.watch_symbols)
-            )
+            # 1. Fetch Raw News (in parallel — sequential fetch was pushing a single Cold Path
+            # cycle past a minute before Gemini was even called at 40 symbols; capped at 20
+            # concurrent requests now that the watchlist is 200 symbols, to avoid hammering
+            # Yahoo Finance with 200 simultaneous requests from one process).
+            news_semaphore = asyncio.Semaphore(20)
+
+            async def _fetch_news(sym):
+                async with news_semaphore:
+                    return await asyncio.to_thread(self.news_agent.fetch_yf_news, sym)
+
+            news_results = await asyncio.gather(*(_fetch_news(sym) for sym in self.watch_symbols))
             news_data = dict(zip(self.watch_symbols, news_results))
 
             # 2. Detect Fraud (Deterministic)
@@ -357,14 +371,28 @@ class BrainEngine:
                 "open_positions": list(_open_positions.values())
             }
 
-            # 5. Single-Shot AI Evaluation
-            new_gates, new_reasoning, new_adjustments = await self.committee_agent.run(
-                self.global_headlines,
-                news_data,
-                fraud_data,
-                tech_data,
-                fin_data
-            )
+            # 5. AI Evaluation — batched into concurrent calls rather than one shot.
+            # With 200 watchlist symbols, a single Gemini call covering all of them would take
+            # many minutes (a 40-symbol call alone took 2-3 minutes empirically) and risk
+            # exceeding even the hard-timeout in call_gemini_with_retry. Splitting into
+            # COMMITTEE_BATCH_SIZE-symbol chunks run CONCURRENTLY keeps per-call latency close
+            # to what's already proven to work, while covering the full watchlist in roughly
+            # the same wall-clock time as a single batch would take alone.
+            batches = [self.watch_symbols[i:i + COMMITTEE_BATCH_SIZE] for i in range(0, len(self.watch_symbols), COMMITTEE_BATCH_SIZE)]
+
+            async def _run_batch(batch_symbols):
+                batch_news = {s: news_data[s] for s in batch_symbols if s in news_data}
+                batch_fraud = {s: fraud_data[s] for s in batch_symbols if s in fraud_data}
+                batch_tech = {s: tech_data[s] for s in batch_symbols if s in tech_data}
+                return await self.committee_agent.run(self.global_headlines, batch_news, batch_fraud, batch_tech, fin_data)
+
+            batch_results = await asyncio.gather(*(_run_batch(b) for b in batches))
+
+            new_gates, new_reasoning, new_adjustments = {}, {}, {}
+            for gates_part, reasoning_part, adjustments_part in batch_results:
+                new_gates.update(gates_part)
+                new_reasoning.update(reasoning_part)
+                new_adjustments.update(adjustments_part)
 
             # Update instance state safely
             for base_sym, gate in new_gates.items():
