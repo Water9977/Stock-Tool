@@ -225,7 +225,9 @@ def _insert_order_sync(order_id, symbol, quantity, price, target, stop_loss, ord
     finally:
         conn.close()
 
-async def place_order(symbol: str, quantity: int, transaction_type: str, access_token: str, target_pct: float = 0.02, sl_pct: float = 0.01, reasoning: str = "") -> dict:
+async def place_order(symbol: str, quantity: int, transaction_type: str, access_token: str, target_pct: float = None, sl_pct: float = None, reasoning: str = "") -> dict:
+    target_pct = Config.TARGET_PCT if target_pct is None else target_pct
+    sl_pct = Config.SL_PCT if sl_pct is None else sl_pct
     transaction_type = transaction_type.upper()
     
     risk_check = await asyncio.to_thread(risk_engine.evaluate_pre_trade)
@@ -530,3 +532,79 @@ async def flatten_positions_for_symbol(symbol: str, access_token: str):
         
     if db_updates:
         await asyncio.to_thread(_flatten_positions_db_sync, db_updates)
+
+def _update_position_targets_sync(updates):
+    """updates: list of (order_id, new_target, new_stop_loss)"""
+    if not updates:
+        return
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        for order_id, new_target, new_stop_loss in updates:
+            cursor.execute("UPDATE orders SET target = ?, stop_loss = ? WHERE id = ?", (new_target, new_stop_loss, order_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+async def adjust_open_positions_for_symbol(symbol: str, suggested_target: float = None, suggested_stop_loss: float = None) -> list:
+    """
+    Lets the Cold Path AI re-price the target/stop-loss on positions that are ALREADY open,
+    not just gate new entries. Previously a target/stop was frozen the instant a trade opened
+    — on a stock that moves slowly, that can mean the position sits locked for hours (or the
+    rest of the day) waiting to hit a target that may never come, with its capital unusable
+    for any other signal in the meantime.
+
+    Every suggestion is validated server-side and can only TIGHTEN the position — move the
+    target closer (lock in a smaller win sooner) and/or move the stop closer (protect more of
+    the current gain) — never loosen it further away, regardless of what the AI suggests. A
+    bad or manipulated LLM output should never be able to widen this account's risk on a
+    position that's already live; the prompt asks for tightening only, but the guarantee here
+    comes from this code, not the prompt.
+
+    Returns the list of order_ids actually adjusted.
+    """
+    adjusted = []
+    db_updates = []
+
+    for order_id, pos in list(_open_positions.items()):
+        if pos["symbol"] != symbol:
+            continue
+
+        direction = pos["transaction_type"]
+        entry = pos["entry_price"]
+        current_target = pos["target"]
+        current_stop = pos["stop_loss"]
+        new_target = current_target
+        new_stop = current_stop
+
+        if suggested_target is not None:
+            if direction == "BUY":
+                # Tightening a BUY target means pulling it DOWN toward entry (closer, smaller
+                # win) but never below entry (that would turn a profit target into a loss exit).
+                if entry < suggested_target < current_target:
+                    new_target = suggested_target
+            else:
+                if entry > suggested_target > current_target:
+                    new_target = suggested_target
+
+        if suggested_stop_loss is not None:
+            if direction == "BUY":
+                # Tightening a BUY stop means raising it toward entry/current price (protects
+                # more gain) but never above entry — that's a target adjustment, not a stop.
+                if current_stop < suggested_stop_loss < entry:
+                    new_stop = suggested_stop_loss
+            else:
+                if current_stop > suggested_stop_loss > entry:
+                    new_stop = suggested_stop_loss
+
+        if new_target != current_target or new_stop != current_stop:
+            pos["target"] = new_target
+            pos["stop_loss"] = new_stop
+            db_updates.append((order_id, new_target, new_stop))
+            adjusted.append(order_id)
+            print(f"[ADJUST] {order_id} ({symbol}): target {current_target}->{new_target}, stop {current_stop}->{new_stop}")
+
+    if db_updates:
+        await asyncio.to_thread(_update_position_targets_sync, db_updates)
+
+    return adjusted

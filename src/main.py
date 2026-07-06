@@ -39,8 +39,8 @@ class OrderRequest(BaseModel):
     symbol: str = Field(..., description="The broker instrument token, e.g., 'NSE_EQ|INE002A01018'")
     quantity: int = Field(..., gt=0, description="Quantity of shares to buy or sell")
     action: str = Field(..., description="Transaction action: 'BUY' or 'SELL'")
-    target_pct: float = Field(default=0.02, description="Target Profit Percentage (e.g. 0.02 for 2%)")
-    sl_pct: float = Field(default=0.01, description="Stop Loss Percentage (e.g. 0.01 for 1%)")
+    target_pct: float = Field(default=Config.TARGET_PCT, description="Target Profit Percentage (e.g. 0.01 for 1%)")
+    sl_pct: float = Field(default=Config.SL_PCT, description="Stop Loss Percentage (e.g. 0.005 for 0.5%)")
 
 async def automated_execution_loop(feed: MarketFeed, technicals: TechnicalEngine, brain: BrainEngine):
     """The core decision engine connecting Hot, Warm, and Cold paths."""

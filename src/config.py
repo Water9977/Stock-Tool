@@ -30,8 +30,15 @@ class Config:
     UPSTOX_HTTP_PROXY = os.getenv("UPSTOX_HTTP_PROXY")
     STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", 300000.0))
     MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", 200000.0))
-    # Per-trade cap kept below total capital so account can hold multiple concurrent positions.
-    MAX_CAPITAL_PER_TRADE = float(os.getenv("MAX_CAPITAL_PER_TRADE", 150000.0))
+    # Per-trade cap kept low so many concurrent positions can run across different symbols at
+    # once, instead of 1-2 trades locking up the whole account for hours waiting on a target.
+    MAX_CAPITAL_PER_TRADE = float(os.getenv("MAX_CAPITAL_PER_TRADE", 80000.0))
+
+    # Target/stop-loss percentages for new entries. Small on purpose — the point is fast,
+    # frequent, small-profit trades that free up capital quickly for the next signal, rather
+    # than a big target that can take all day (or never) to hit while capital sits idle.
+    TARGET_PCT = float(os.getenv("TARGET_PCT", 0.01))
+    SL_PCT = float(os.getenv("SL_PCT", 0.005))
 
     TRADING_MODE = os.getenv("TRADING_MODE", "VIRTUAL").upper()
 

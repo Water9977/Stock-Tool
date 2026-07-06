@@ -188,7 +188,7 @@ async def replay_ticks(df, yf_symbol: str, upstox_symbol: str, verbose: bool = F
     be independent reimplementations of this exact loop that would silently drift apart on
     the next change to either one.
 
-    Target/Stop are applied as 2% / 1% of entry price (same as live).
+    Target/Stop are applied from Config.TARGET_PCT / Config.SL_PCT of entry price (same as live).
 
     IMPORTANT — this is technicals-only. It does NOT apply the Cold Path AI gate
     (ALLOW_BUY/ALLOW_SELL/ALLOW_ALL/VETO/FLATTEN) that the live system also requires before
@@ -204,8 +204,8 @@ async def replay_ticks(df, yf_symbol: str, upstox_symbol: str, verbose: bool = F
 
     engine_task = asyncio.create_task(technicals.run(tick_queue))
 
-    TARGET_PCT = 0.02   # 2% target
-    SL_PCT = 0.01       # 1% stop loss
+    TARGET_PCT = Config.TARGET_PCT
+    SL_PCT = Config.SL_PCT
 
     try:
         for ts, row in df.iterrows():

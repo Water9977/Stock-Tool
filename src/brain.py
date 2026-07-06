@@ -185,6 +185,18 @@ class CommitteeAgent:
 
     async def run(self, global_headlines, news_data, fraud_data, technical_data, financial_data):
         print("[CommitteeAgent] Evaluating Sentiment, Macro, and Gates via single AI call...")
+
+        # Group currently open positions by base ticker so each symbol's own PER-SYMBOL DATA
+        # block below can show its position inline — the model reasons much better about
+        # "should I tighten THIS position" when it's right next to that symbol's own
+        # technicals, rather than in one combined JSON blob at the top of the prompt.
+        upstox_to_base = {v: k.replace(".NS", "") for k, v in Config.SYMBOL_MAP.items()}
+        positions_by_base = {}
+        for pos in financial_data.get('open_positions', []):
+            base = upstox_to_base.get(pos.get('symbol'))
+            if base:
+                positions_by_base.setdefault(base, []).append(pos)
+
         schema = {
             'type': 'OBJECT',
             'properties': {
@@ -199,7 +211,9 @@ class CommitteeAgent:
                             'gate': {'type': 'STRING', 'description': 'ALLOW_BUY, ALLOW_SELL, ALLOW_ALL, VETO, or FLATTEN'},
                             'conviction_score': {'type': 'NUMBER', 'description': '0.0 to 1.0 representing confidence'},
                             'sentiment': {'type': 'NUMBER', 'description': '-1.0 to 1.0 based on news'},
-                            'reasoning': {'type': 'STRING', 'description': 'Why this gate was chosen based on tech, news, and fraud signals.'}
+                            'reasoning': {'type': 'STRING', 'description': 'Why this gate was chosen based on tech, news, and fraud signals.'},
+                            'suggested_target': {'type': 'NUMBER', 'description': 'Only if this symbol has an open position and you want to tighten its target closer to lock in a smaller win sooner. Omit/null otherwise.'},
+                            'suggested_stop_loss': {'type': 'NUMBER', 'description': 'Only if this symbol has an open position and you want to tighten its stop closer to protect more of the current gain. Omit/null otherwise.'}
                         },
                         'required': ['ticker', 'gate', 'conviction_score', 'sentiment', 'reasoning']
                     }
@@ -207,12 +221,11 @@ class CommitteeAgent:
             },
             'required': ['macro_mood', 'macro_reasoning', 'gates']
         }
-        
+
         prompt = "You are an elite, multi-agent AI trading committee (Sentiment Analyst, Macro Economist, Risk Manager) "
         prompt += "for a virtual paper-trading account with a large capital base. Your job is to evaluate the provided "
         prompt += "inputs and decide the final action gate for each symbol. Output JSON as requested.\n\n"
         prompt += f"AVAILABLE CASH FOR NEW TRADES: Rs. {financial_data.get('available_balance', 0):.2f}\n"
-        prompt += f"CURRENT OPEN POSITIONS: {json.dumps(financial_data.get('open_positions', []))}\n"
         prompt += f"GLOBAL MACRO HEADLINES:\n{chr(10).join(global_headlines) if global_headlines else 'None'}\n\n"
 
         prompt += "Guidelines for Action Gate:\n"
@@ -223,7 +236,14 @@ class CommitteeAgent:
         prompt += "  or an extreme/contradictory technical reading. Do not VETO purely for low available cash unless\n"
         prompt += "  it is genuinely near zero.\n"
         prompt += "- If sentiment is extremely negative, a crash is imminent, or FRAUD DETECTED is true, output FLATTEN.\n"
-        prompt += "- Consider the last 10 RSI and MACD values for trend direction. If RSI is > 70 (overbought) -> favor ALLOW_SELL. If RSI < 30 (oversold) -> favor ALLOW_BUY.\n\n"
+        prompt += "- Consider the last 10 RSI and MACD values for trend direction. If RSI is > 70 (overbought) -> favor ALLOW_SELL. If RSI < 30 (oversold) -> favor ALLOW_BUY.\n"
+        prompt += "- The strategy here is fast, frequent, small-profit trades — capital tied up for hours in one slow\n"
+        prompt += "  trade is capital that can't be used on a better signal elsewhere. If a symbol below shows an OPEN\n"
+        prompt += "  POSITION and momentum looks like it's fading before reaching target, suggest tightening its target\n"
+        prompt += "  (suggested_target) closer to the current price to lock in a smaller win sooner, and/or tightening\n"
+        prompt += "  its stop (suggested_stop_loss) to protect more of any current gain. Only ever suggest moving these\n"
+        prompt += "  CLOSER to the current price, in the direction that reduces risk or time-to-exit — never suggest\n"
+        prompt += "  loosening either one further away; the system will reject any suggestion that tries to.\n\n"
 
         prompt += "PER-SYMBOL DATA:\n"
         for sym, headlines in news_data.items():
@@ -235,11 +255,15 @@ class CommitteeAgent:
             prompt += f"FRAUD DETECTED: {fraud_detected}\n"
             prompt += f"NEWS HEADLINES:\n{chr(10).join(headlines) if headlines else 'No news'}\n"
             prompt += f"RSI (Last 10 5-min candles): {tech.get('RSI', [])}\n"
-            prompt += f"MACD (Last 10 5-min candles): {tech.get('MACD', [])}\n\n"
-            
+            prompt += f"MACD (Last 10 5-min candles): {tech.get('MACD', [])}\n"
+            if base_symbol in positions_by_base:
+                prompt += f"OPEN POSITION(S): {json.dumps(positions_by_base[base_symbol])}\n"
+            prompt += "\n"
+
         result = await call_gemini_with_retry(self.client, self.rate_limiter, prompt, schema)
         gates = {}
         reasoning = {}
+        adjustments = {}
         if result:
             print(f"[COMMITTEE] Macro Mood: {result.get('macro_mood')} | Reasoning: {result.get('macro_reasoning')}")
             if 'gates' in result:
@@ -248,13 +272,17 @@ class CommitteeAgent:
                     gate = item.get('gate', 'VETO').upper()
                     gates[ticker] = gate
                     reasoning[ticker] = item.get('reasoning', '')
+                    sug_target = item.get('suggested_target')
+                    sug_stop = item.get('suggested_stop_loss')
+                    if sug_target is not None or sug_stop is not None:
+                        adjustments[ticker] = {"target": sug_target, "stop_loss": sug_stop}
                     print(f"[COMMITTEE] {ticker} -> Gate: {gate} | Conviction: {item.get('conviction_score')} | Sentiment: {item.get('sentiment')} | Reason: {item.get('reasoning')}")
         else:
             print("[COMMITTEE] LLM call failed, falling back to VETO.")
             for sym in news_data.keys():
                 gates[sym.replace(".NS", "")] = "VETO"
 
-        return gates, reasoning
+        return gates, reasoning, adjustments
 
 class BrainEngine:
     def __init__(self):
@@ -290,7 +318,7 @@ class BrainEngine:
             self.gates = {s.replace(".NS", ""): "ALLOW_ALL" for s in self.watch_symbols}
             return
             
-        from src.orders import get_available_balance, _open_positions
+        from src.orders import get_available_balance, _open_positions, adjust_open_positions_for_symbol
 
         while True:
             # Skip AI evaluation entirely outside NSE trading hours — no point burning
@@ -330,7 +358,7 @@ class BrainEngine:
             }
 
             # 5. Single-Shot AI Evaluation
-            new_gates, new_reasoning = await self.committee_agent.run(
+            new_gates, new_reasoning, new_adjustments = await self.committee_agent.run(
                 self.global_headlines,
                 news_data,
                 fraud_data,
@@ -345,6 +373,16 @@ class BrainEngine:
             for base_sym, reason in new_reasoning.items():
                 if base_sym in self.gates:
                     self.reasoning[base_sym] = reason
+
+            # 6. Apply any tightening suggestions to positions already open on these symbols.
+            # adjust_open_positions_for_symbol() re-validates every suggestion itself (can
+            # only tighten, never loosen) — this call is just wiring the AI's output through,
+            # not a trust boundary.
+            for base_sym, adj in new_adjustments.items():
+                yf_sym = f"{base_sym}.NS"
+                upstox_sym = Config.SYMBOL_MAP.get(yf_sym)
+                if upstox_sym:
+                    await adjust_open_positions_for_symbol(upstox_sym, adj.get("target"), adj.get("stop_loss"))
 
             await asyncio.sleep(300.0) # Refresh every 5 minutes
 
