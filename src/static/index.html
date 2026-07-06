@@ -303,6 +303,11 @@
         }
 
         /* Watchlist Styles */
+        .watchlist-scroll {
+            max-height: 520px;
+            overflow-y: auto;
+        }
+
         .watchlist-table {
             width: 100%;
             border-collapse: collapse;
@@ -317,6 +322,10 @@
             text-transform: uppercase;
             letter-spacing: 0.05em;
             border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            position: sticky;
+            top: 0;
+            background: #0d111e;
+            z-index: 1;
         }
 
         .watchlist-table td {
@@ -640,6 +649,7 @@
                     </h2>
                 </div>
                 
+                <div class="watchlist-scroll">
                 <table class="watchlist-table">
                     <thead>
                         <tr>
@@ -656,6 +666,7 @@
                         </tr>
                     </tbody>
                 </table>
+                </div>
             </section>
             
             <!-- Right Side: News Wire -->
