@@ -75,33 +75,50 @@ def init_db():
     _init_db_sync()
     print("Database tables initialized successfully.")
 
-def _ensure_day_row(cursor, starting_capital: float):
+def _ensure_day_row(cursor, fallback_starting_capital: float):
     """
     Idempotent insert of today's (IST) daily_stats row if it doesn't already exist. Called at
     the top of every read/write in this module so a mid-session IST-midnight rollover on a
     24/7 deployment self-heals on the very next DB access, instead of requiring a restart.
 
-    Each new day starts fresh at `starting_capital` (does not compound yesterday's P&L
-    forward) — this matches how the system already behaves on every container restart today
-    (main.py's startup_event always reseeds from Config.STARTING_CAPITAL). If compounding
-    day-over-day P&L into the next day's starting capital is preferred instead, this is the
-    one place to change it.
+    A brand-new day's starting capital COMPOUNDS forward from the most recent prior day's
+    ending balance (starting_capital + realized_pnl) — a real trading account doesn't reset
+    to a round number every morning, and an earlier version of this function did exactly
+    that by design, which read as "my profit got wiped" the first time a real multi-day gap
+    happened even though every trade record was still fully intact in the DB. Falls back to
+    `fallback_starting_capital` (Config.STARTING_CAPITAL) only when there is no prior day at
+    all — i.e. the very first row this account ever has, or immediately after a deliberate
+    /admin/reset-simulation wipe (which deletes all daily_stats rows, so there's no "previous
+    day" left to carry forward from).
     """
+    today_str = _ist_today_str()
+    cursor.execute("SELECT date FROM daily_stats WHERE date = ?", (today_str,))
+    if cursor.fetchone():
+        return  # today's row already exists — nothing to do
+
+    cursor.execute(
+        "SELECT starting_capital, realized_pnl FROM daily_stats WHERE date < ? ORDER BY date DESC LIMIT 1",
+        (today_str,)
+    )
+    prior = cursor.fetchone()
+    carried_capital = (prior[0] + prior[1]) if prior else fallback_starting_capital
+
     cursor.execute(
         "INSERT INTO daily_stats (date, starting_capital) VALUES (?, ?) ON CONFLICT(date) DO NOTHING",
-        (_ist_today_str(), starting_capital)
+        (today_str, carried_capital)
     )
 
 def _start_day_stats_sync(starting_capital: float):
-    today_str = _ist_today_str()
+    """
+    Called once at every container startup. Only seeds today's row if it doesn't already
+    exist (via _ensure_day_row) — it must NOT force-overwrite starting_capital on every
+    restart, or a same-day redeploy would silently reset a carried-forward or
+    already-accumulating balance back to the fixed config value.
+    """
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("""
-            INSERT INTO daily_stats (date, starting_capital)
-            VALUES (?, ?)
-            ON CONFLICT(date) DO UPDATE SET starting_capital = excluded.starting_capital
-        """, (today_str, starting_capital))
+        _ensure_day_row(cursor, starting_capital)
         conn.commit()
     finally:
         conn.close()

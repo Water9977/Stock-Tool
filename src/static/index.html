@@ -1006,7 +1006,7 @@
             const walletEl = document.getElementById('walletValue');
             walletEl.innerText = formatINR(walletVal);
             walletEl.className = walletVal >= startingCap ? 'metric-value pnl-positive' : 'metric-value pnl-negative';
-            document.getElementById('walletSub').innerText = `Available cash of ₹${startingCap.toLocaleString('en-IN')} starting balance`;
+            document.getElementById('walletSub').innerText = `Today opened at ₹${startingCap.toLocaleString('en-IN')} (compounds day over day)`;
 
             document.getElementById('maxLossValue').innerText = formatINR(maxLossVal);
             document.getElementById('maxCapitalValue').innerText = formatINR(maxCapVal);
