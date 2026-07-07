@@ -38,7 +38,7 @@ class Config:
     # frequent, small-profit trades that free up capital quickly for the next signal, rather
     # than a big target that can take all day (or never) to hit while capital sits idle.
     TARGET_PCT = float(os.getenv("TARGET_PCT", 0.01))
-    SL_PCT = float(os.getenv("SL_PCT", 0.005))
+    SL_PCT = float(os.getenv("SL_PCT", 0.008))
 
     TRADING_MODE = os.getenv("TRADING_MODE", "VIRTUAL").upper()
 
